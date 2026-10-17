@@ -36,3 +36,23 @@ def test_run_needs_a_gemini_key_when_ai_answers_are_on(tmp_path, monkeypatch, ca
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     assert main(["run", "--profile", DENTAL]) == 2
     assert "GEMINI_API_KEY" in capsys.readouterr().out
+
+
+def test_serve_without_a_webhook_secret_does_not_start(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST-TOKEN")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.delenv("WEBHOOK_SECRET", raising=False)
+    assert main(["serve", "--profile", DENTAL]) == 2
+    assert "WEBHOOK_SECRET" in capsys.readouterr().out
+
+
+def test_env_errors_never_echo_other_secrets(tmp_path, monkeypatch, capsys):
+    # A raw pydantic error would print the whole input, other secrets included.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-must-not-be-printed")
+    monkeypatch.setenv("WEBHOOK_SECRET", "webhook-must-not-be-printed")
+    assert main(["run", "--profile", DENTAL]) == 2
+    out = capsys.readouterr().out
+    assert "must-not-be-printed" not in out and "TELEGRAM_BOT_TOKEN" in out

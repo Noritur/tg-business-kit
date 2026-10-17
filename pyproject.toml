@@ -6,14 +6,17 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
+  "fastapi>=0.120,<1",
   "google-genai==1.50.0",
   "pydantic>=2.12,<3",
   "pydantic-settings>=2.12,<3",
   "python-telegram-bot==22.7",
+  "uvicorn>=0.38,<1",
 ]
 
 [dependency-groups]
 dev = [
+  "httpx2>=2.13,<3",
   "pytest>=9,<10",
   "pytest-asyncio>=1.4,<2",
   "ruff>=0.14,<1",
