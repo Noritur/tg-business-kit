@@ -1,0 +1,37 @@
+{
+  "slug": "bright-smile-demo",
+  "name": "Bright Smile Dental",
+  "tagline": "family dentistry, same-week appointments",
+  "about": "A friendly family dental practice. New patients welcome, check-ups, hygiene, fillings, crowns and whitening under one roof. Emergency slots every weekday morning.",
+  "language": "en",
+  "timezone": "Europe/London",
+  "owner_contact": "+44 20 7946 0000",
+  "modules": {"booking": true, "faq": true, "ai_answers": true},
+  "services": [
+    {"code": "chk", "label": "Check-up + hygiene cleaning", "price": "60 GBP", "note": "new patients, 60 min"},
+    {"code": "fill", "label": "Filling", "price": "from 95 GBP", "note": "after an examination"},
+    {"code": "white", "label": "Teeth whitening", "price": "from 250 GBP", "note": "consultation included"},
+    {"code": "emerg", "label": "Emergency visit", "price": "75 GBP", "note": "pain, swelling, a broken tooth"}
+  ],
+  "booking": {
+    "weekly_slots": {
+      "mon": ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"],
+      "tue": ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"],
+      "wed": ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"],
+      "thu": ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00"],
+      "fri": ["09:00", "10:00", "11:00", "14:00", "15:00", "16:00"],
+      "sat": ["10:00", "11:00", "12:00", "13:00"]
+    },
+    "days_ahead": 14,
+    "max_day_buttons": 6,
+    "slot_capacity": 1,
+    "trial": {"enabled": false, "label": ""}
+  },
+  "faq": [
+    {"q": "Do you accept dental insurance?", "a": "Yes, we accept Bupa, Cigna and Aviva. We do not accept Denplan. Bring your policy number to the first visit."},
+    {"q": "I have severe pain or swelling", "a": "Please call us on +44 20 7946 0000. Emergency slots are held every weekday at 09:00. If you have swelling that affects breathing or swallowing, call 999."},
+    {"q": "How much is the first visit?", "a": "A check-up with a hygiene cleaning is 60 GBP for new patients and takes about an hour."},
+    {"q": "What are your opening hours?", "a": "Monday to Friday 09:00-18:00, Saturday 10:00-14:00. Closed on Sunday."},
+    {"q": "Is there parking?", "a": "Yes, free parking is available behind the building."}
+  ]
+}
