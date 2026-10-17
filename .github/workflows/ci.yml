@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check .
+      # No secrets needed: Telegram and Gemini are faked, network is blocked.
+      - run: uv run --frozen pytest
+      - run: uv run --frozen python -m kit validate presets/*.json
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build --tag tg-business-kit:ci .
+      - name: image starts and refuses to run without a token
+        run: |
+          set +e
+          out=$(docker run --rm tg-business-kit:ci 2>&1)
+          code=$?
+          echo "$out"
+          test "$code" -eq 2 && echo "$out" | grep -q "TELEGRAM_BOT_TOKEN"

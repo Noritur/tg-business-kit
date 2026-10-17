@@ -1,0 +1,48 @@
+# docker compose up -d --build                    long polling (no public URL needed)
+# docker compose --profile webhook up -d --build  webhook server on 127.0.0.1:8000
+#
+# KIT_PROFILE picks the business, default presets/dental-clinic.json.
+
+x-kit: &kit
+  build: .
+  image: tg-business-kit:local
+  env_file:
+    - path: .env
+      required: false  # without it the bot exits with a list of missing keys
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  bot:
+    <<: *kit
+    command: ["python", "-m", "kit", "run", "--profile", "${KIT_PROFILE:-presets/dental-clinic.json}"]
+
+  webhook:
+    <<: *kit
+    profiles: ["webhook"]
+    command:
+      - python
+      - -m
+      - kit
+      - serve
+      - --profile
+      - ${KIT_PROFILE:-presets/dental-clinic.json}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    # Bound to localhost only: Docker opens published ports in iptables itself,
+    # past ufw, so "0.0.0.0:8000" here would be public whatever ufw says.
+    # Put a TLS reverse proxy in front for Telegram.
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 30s
+      timeout: 3s
+      retries: 3
