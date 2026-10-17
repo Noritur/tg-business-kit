@@ -1,0 +1,34 @@
+[project]
+name = "tg-business-kit"
+version = "0.1.0"
+description = "One Telegram bot engine for small businesses: booking, FAQ and grounded AI answers, configured by one JSON profile per client"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "google-genai==1.50.0",
+  "pydantic>=2.12,<3",
+  "pydantic-settings>=2.12,<3",
+  "python-telegram-bot==22.7",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9,<10",
+  "pytest-asyncio>=1.4,<2",
+  "ruff>=0.14,<1",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
