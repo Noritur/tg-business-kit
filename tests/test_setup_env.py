@@ -11,6 +11,7 @@ GEMINI = "AIza-very-secret"
 
 @pytest.fixture
 def setup_env(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))  # for its `import _telegram`
     spec = importlib.util.spec_from_file_location("setup_env", ROOT / "scripts" / "setup_env.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -46,3 +47,14 @@ def test_rejected_token_stops_before_writing(setup_env, monkeypatch):
     with pytest.raises(SystemExit, match="did not accept"):
         setup_env.main()
     assert not setup_env.ENV.exists()
+
+
+def test_webhook_secret_is_generated_once_and_never_printed(setup_env, capsys, monkeypatch):
+    setup_env.main()
+    first = setup_env.read_env()["WEBHOOK_SECRET"]
+    assert len(first) >= 40 and first not in capsys.readouterr().out
+
+    answers = iter([TOKEN, GEMINI])
+    monkeypatch.setattr(setup_env.getpass, "getpass", lambda prompt: next(answers))
+    setup_env.main()
+    assert setup_env.read_env()["WEBHOOK_SECRET"] == first  # a rerun keeps the secret
