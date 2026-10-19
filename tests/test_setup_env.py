@@ -58,3 +58,11 @@ def test_webhook_secret_is_generated_once_and_never_printed(setup_env, capsys, m
     monkeypatch.setattr(setup_env.getpass, "getpass", lambda prompt: next(answers))
     setup_env.main()
     assert setup_env.read_env()["WEBHOOK_SECRET"] == first  # a rerun keeps the secret
+
+
+def test_a_username_instead_of_the_id_is_asked_again(setup_env, monkeypatch, capsys):
+    typed = iter(["@some_username", "424242"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(typed))
+    setup_env.main()
+    assert setup_env.read_env()["ADMIN_USER_ID"] == "424242"
+    assert "not a @username" in capsys.readouterr().out

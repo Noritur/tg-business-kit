@@ -65,9 +65,12 @@ def main() -> None:
     gemini_key = getpass.getpass("key: ").strip()
 
     print("[3/4] your Telegram user id for owner notifications (@userinfobot shows it)")
-    admin_id = input("id: ").strip()
-    if admin_id and not (admin_id.isascii() and admin_id.isdigit()):
-        sys.exit("[fail] the user id is a number, e.g. 123456789")
+    while True:
+        # Ask again instead of exiting: the token and key typed above would be lost.
+        admin_id = input("id: ").strip()
+        if not admin_id or (admin_id.isascii() and admin_id.isdigit()):
+            break
+        print("[!]   the id is a number like 123456789, not a @username - try again")
 
     values = read_env()
     values.update(
