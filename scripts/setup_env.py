@@ -1,10 +1,11 @@
 """Writes .env for a local run. Secrets go in through hidden prompts and are
 never printed, logged or passed on a command line.
 
-    uv run python scripts/setup_env.py
+    uv run python scripts/setup_env.py                   ask for token, key and owner id
+    uv run python scripts/setup_env.py --generated-only  only add missing generated secrets
 
 Steps: token (checked with getMe) -> Gemini key (optional) -> owner id ->
-WEBHOOK_SECRET generated if missing -> .env with permissions 600. Other keys
+generated secrets added if missing -> .env with permissions 600. Other keys
 already in .env are kept; comments are rewritten from COMMENTS, a hand-written
 comment is not kept.
 """
@@ -22,7 +23,12 @@ COMMENTS = {
     "GEMINI_API_KEY": "# Gemini API key; empty = no AI answers",
     "ADMIN_USER_ID": "# Owner's Telegram user id for notifications and /leads",
     "WEBHOOK_SECRET": "# Shared secret Telegram sends with every webhook call",
+    "POSTGRES_PASSWORD": "# Password of the compose Postgres (docker compose reads it)",
+    "ADMIN_API_TOKEN": "# Bearer token for GET /api/leads; empty = endpoint off",
 }
+# Made here, never typed by a person. token_urlsafe gives A-Z a-z 0-9 _ -, which
+# Telegram accepts as a webhook secret and needs no escaping inside a URL.
+GENERATED = ("WEBHOOK_SECRET", "POSTGRES_PASSWORD", "ADMIN_API_TOKEN")
 
 
 def bot_username(token: str) -> str | None:
@@ -53,7 +59,25 @@ def write_env(values: dict[str, str]) -> None:
     os.chmod(ENV, 0o600)
 
 
+def add_generated(values: dict[str, str]) -> list[str]:
+    added = [key for key in GENERATED if not values.get(key)]
+    for key in added:
+        values[key] = secrets.token_urlsafe(32)
+    return added
+
+
+def generated_only() -> None:
+    values = read_env()
+    added = add_generated(values)
+    if added:
+        write_env(values)
+    print(f"[ok]  generated: {', '.join(added) or 'nothing, all present'}")
+
+
 def main() -> None:
+    if "--generated-only" in sys.argv[1:]:
+        generated_only()
+        return
     print("[1/4] Telegram bot token from @BotFather (input is hidden)")
     token = getpass.getpass("token: ").strip()
     username = bot_username(token) if token else None
@@ -76,9 +100,7 @@ def main() -> None:
     values.update(
         {"TELEGRAM_BOT_TOKEN": token, "GEMINI_API_KEY": gemini_key, "ADMIN_USER_ID": admin_id}
     )
-    if not values.get("WEBHOOK_SECRET"):
-        # Telegram allows A-Z, a-z, 0-9, _ and -, up to 256 characters.
-        values["WEBHOOK_SECRET"] = secrets.token_urlsafe(32)
+    add_generated(values)
     write_env(values)
     statuses = ", ".join(f"{key}={'set' if values[key] else 'empty'}" for key in COMMENTS)
     print(f"[4/4] {ENV.name} written with permissions 600: {statuses}")

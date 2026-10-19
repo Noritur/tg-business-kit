@@ -10,6 +10,21 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: kit
+          POSTGRES_PASSWORD: kit
+          POSTGRES_DB: kit_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kit -d kit_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://kit:kit@localhost:5432/kit_test
+      # Postgres tests must run here, not be skipped.
+      KIT_REQUIRE_PG: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0

@@ -1,7 +1,9 @@
-# docker compose up -d --build                    long polling (no public URL needed)
-# docker compose --profile webhook up -d --build  webhook server on 127.0.0.1:8000
+# docker compose up -d --build                    db + migrations + long-polling bot
+# docker compose --profile webhook up -d --build  + webhook server on 127.0.0.1:8000
+# docker compose --profile test up -d testdb      throwaway Postgres for the test suite
 #
 # KIT_PROFILE picks the business, default presets/dental-clinic.json.
+# POSTGRES_PASSWORD comes from .env (scripts/setup_env.py generates it).
 
 x-kit: &kit
   build: .
@@ -9,15 +11,41 @@ x-kit: &kit
   env_file:
     - path: .env
       required: false  # without it the bot exits with a list of missing keys
+  environment:
+    DATABASE_URL: postgresql://kit:${POSTGRES_PASSWORD:?run scripts/setup_env.py first}@db:5432/kit
   restart: unless-stopped
   read_only: true
   tmpfs: [/tmp]
   security_opt: ["no-new-privileges:true"]
 
 services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: kit
+      POSTGRES_DB: kit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/setup_env.py first}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    # Not published: only the containers on this network reach the database.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kit -d kit"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    <<: *kit
+    command: ["python", "-m", "kit", "migrate"]
+    restart: "no"
+    depends_on:
+      db: {condition: service_healthy}
+
   bot:
     <<: *kit
     command: ["python", "-m", "kit", "run", "--profile", "${KIT_PROFILE:-presets/dental-clinic.json}"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
 
   webhook:
     <<: *kit
@@ -37,6 +65,8 @@ services:
     # past ufw, so "0.0.0.0:8000" here would be public whatever ufw says.
     # Put a TLS reverse proxy in front for Telegram.
     ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
     healthcheck:
       test:
         - CMD
@@ -46,3 +76,18 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+
+  # Throwaway database for `pytest`: fixed test-only password, data in tmpfs.
+  #   TEST_DATABASE_URL=postgresql://kit:kit@127.0.0.1:5434/kit_test uv run pytest
+  testdb:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: kit
+      POSTGRES_PASSWORD: kit
+      POSTGRES_DB: kit_test
+    ports: ["127.0.0.1:5434:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+
+volumes:
+  pgdata:

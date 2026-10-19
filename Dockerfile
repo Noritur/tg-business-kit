@@ -22,6 +22,7 @@ WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
 COPY kit ./kit
 COPY presets ./presets
+COPY migrations ./migrations
 
 RUN useradd --create-home --uid 10001 app
 USER app

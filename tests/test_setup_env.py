@@ -66,3 +66,16 @@ def test_a_username_instead_of_the_id_is_asked_again(setup_env, monkeypatch, cap
     setup_env.main()
     assert setup_env.read_env()["ADMIN_USER_ID"] == "424242"
     assert "not a @username" in capsys.readouterr().out
+
+
+def test_generated_only_adds_missing_secrets_without_asking(setup_env, monkeypatch, capsys):
+    setup_env.ENV.write_text("TELEGRAM_BOT_TOKEN=keep-me\nWEBHOOK_SECRET=already-here\n")
+    monkeypatch.setattr(setup_env.getpass, "getpass", lambda prompt: pytest.fail("asked"))
+    monkeypatch.setattr(setup_env.sys, "argv", ["setup_env.py", "--generated-only"])
+    setup_env.main()
+
+    values = setup_env.read_env()
+    assert values["TELEGRAM_BOT_TOKEN"] == "keep-me" and values["WEBHOOK_SECRET"] == "already-here"
+    out = capsys.readouterr().out
+    assert "POSTGRES_PASSWORD, ADMIN_API_TOKEN" in out
+    assert values["POSTGRES_PASSWORD"] not in out and values["ADMIN_API_TOKEN"] not in out
