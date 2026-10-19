@@ -55,6 +55,11 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "owner_question": "Питання, на яке бот не відповів:\n{client}\n\n{question}",
         "leads_empty": "Записів поки нема.",
         "leads_title": "Останні записи ({count}):",
+        "cmd_start": "Головне меню",
+        "cmd_book": "Записатися",
+        "cmd_prices": "Послуги і ціни",
+        "cmd_faq": "Часті питання",
+        "cmd_leads": "Останні записи (для власника)",
     },
     "en": {
         "greeting": (
@@ -100,6 +105,11 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "owner_question": "A question the bot could not answer:\n{client}\n\n{question}",
         "leads_empty": "No bookings yet.",
         "leads_title": "Latest bookings ({count}):",
+        "cmd_start": "Main menu",
+        "cmd_book": "Book a visit",
+        "cmd_prices": "Services and prices",
+        "cmd_faq": "Frequently asked questions",
+        "cmd_leads": "Latest bookings (owner only)",
     },
 }
 

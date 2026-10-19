@@ -27,6 +27,7 @@ from telegram import Update
 from telegram.request import BaseRequest
 
 from kit.app import Deps, build_app
+from kit.commands import register_menu
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ def create_app(
         if on_startup is not None:
             await on_startup()
         await application.initialize()
+        await register_menu(application.bot, deps.profile, deps.admin_id)
         try:
             yield
         finally:

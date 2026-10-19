@@ -60,24 +60,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(greeting(profile), reply_markup=main_menu_markup(profile))
 
 
-async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    d = deps(context)
-    profile, t = d.profile, d.profile.t
-    screen = callbacks.parse_menu(query.data or "")
-    if screen is None:
-        return
-
+def screen(profile: Profile, name: str, now) -> tuple[str, InlineKeyboardMarkup]:
+    """Text and buttons of a menu screen. Buttons edit the message in place,
+    commands send it as a new one; both take the screen from here."""
+    t = profile.t
     # A screen of a disabled module falls back to the main menu.
-    if screen == "sched" and not profile.modules.booking:
-        screen = "home"
-    if screen == "faq" and not profile.modules.faq:
-        screen = "home"
+    if (name == "sched" and not profile.modules.booking) or (
+        name == "faq" and not profile.modules.faq
+    ):
+        name = "home"
 
-    if screen == "home":
-        await edit(query, greeting(profile), main_menu_markup(profile))
-    elif screen == "prices":
+    if name == "prices":
         lines = [t("prices_title"), ""]
         for s in profile.services:
             lines.append(f"{s.label} — {s.price}")
@@ -85,19 +78,45 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 lines.append(f"  {s.note}")
         if profile.booking and profile.booking.trial.enabled:
             lines += ["", profile.booking.trial.label]
-        await edit(query, "\n".join(lines), book_and_back(profile))
-    elif screen == "sched":
-        days = upcoming_days(profile, d.clock())
+        return "\n".join(lines), book_and_back(profile)
+    if name == "sched":
+        days = upcoming_days(profile, now)
         lines = [t("schedule_title"), ""] + [t.day(day) for day in days]
         lines += ["", t("schedule_note", city=profile.city)]
-        await edit(query, "\n".join(lines), book_and_back(profile))
-    elif screen == "faq":
+        return "\n".join(lines), book_and_back(profile)
+    if name == "faq":
         rows = [
             [InlineKeyboardButton(item.q, callback_data=callbacks.faq(i))]
             for i, item in enumerate(profile.faq)
         ]
         rows.append(back_to_menu_row(profile))
-        await edit(query, t("faq_title"), InlineKeyboardMarkup(rows))
+        return t("faq_title"), InlineKeyboardMarkup(rows)
+    return greeting(profile), main_menu_markup(profile)
+
+
+async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    d = deps(context)
+    name = callbacks.parse_menu(query.data or "")
+    if name is None:
+        return
+    await edit(query, *screen(d.profile, name, d.clock()))
+
+
+def command(name: str):
+    """A /command that opens a menu screen as a new message."""
+
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        if message is None:
+            return
+        d = deps(context)
+        text, markup = screen(d.profile, name, d.clock())
+        await message.reply_text(text, reply_markup=markup)
+
+    handler.__name__ = f"{name}_command"
+    return handler
 
 
 async def ignore(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

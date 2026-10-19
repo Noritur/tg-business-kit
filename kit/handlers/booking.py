@@ -30,6 +30,15 @@ def _service_markup(profile: Profile) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def book_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/book: the first booking step as a new message."""
+    message = update.effective_message
+    if message is None:
+        return
+    profile = deps(context).profile
+    await message.reply_text(profile.t("choose_service"), reply_markup=_service_markup(profile))
+
+
 async def _free_times(context: ContextTypes.DEFAULT_TYPE, day: date) -> list[str]:
     d = deps(context)
     taken = await d.store.taken_by_time(d.profile.slug, day)  # one read for the whole day

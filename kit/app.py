@@ -21,6 +21,7 @@ from telegram.ext import (
 )
 from telegram.request import BaseRequest
 
+from kit.commands import register_menu
 from kit.handlers import admin, booking, chat, faq, menu
 from kit.llm import Answerer
 from kit.profile import Profile
@@ -62,9 +63,13 @@ def build_app(
     post_init: Callable[[Application], Awaitable[None]] | None = None,
     post_shutdown: Callable[[Application], Awaitable[None]] | None = None,
 ) -> Application:
-    builder = Application.builder().token(token)
-    if post_init is not None:
-        builder = builder.post_init(post_init)
+    async def _post_init(app: Application) -> None:
+        if post_init is not None:
+            await post_init(app)
+        # Polling runs post_init; the webhook server calls register_menu itself.
+        await register_menu(app.bot, deps.profile, deps.admin_id)
+
+    builder = Application.builder().token(token).post_init(_post_init)
     if post_shutdown is not None:
         builder = builder.post_shutdown(post_shutdown)
     if request is not None:
@@ -78,10 +83,17 @@ def build_app(
     app.add_handler(CommandHandler("start", menu.start, filters=_PRIVATE_MESSAGES))
     app.add_handler(CommandHandler("leads", admin.leads, filters=_PRIVATE_MESSAGES))
     app.add_handler(CallbackQueryHandler(menu.router, pattern=r"^m:"))
+    # The same commands kit.commands puts in the "Menu" button.
+    if deps.profile.services:
+        app.add_handler(
+            CommandHandler("prices", menu.command("prices"), filters=_PRIVATE_MESSAGES)
+        )
     if modules.faq:
         app.add_handler(CallbackQueryHandler(faq.item, pattern=r"^f:"))
+        app.add_handler(CommandHandler("faq", menu.command("faq"), filters=_PRIVATE_MESSAGES))
     if modules.booking:
         app.add_handler(CallbackQueryHandler(booking.router, pattern=r"^b:"))
+        app.add_handler(CommandHandler("book", booking.book_command, filters=_PRIVATE_MESSAGES))
     app.add_handler(
         MessageHandler(_PRIVATE_MESSAGES & filters.TEXT & ~filters.COMMAND, chat.message)
     )
