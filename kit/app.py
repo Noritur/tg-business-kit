@@ -6,7 +6,7 @@ of module globals: tests swap them per test, and nothing leaks between bots.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -24,7 +24,7 @@ from telegram.request import BaseRequest
 from kit.handlers import admin, booking, chat, faq, menu
 from kit.llm import Answerer
 from kit.profile import Profile
-from kit.storage import LeadStore
+from kit.storage import LeadStore, MemoryUpdateLog, UpdateLog
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,8 @@ class Deps:
     answerer: Answerer | None
     admin_id: int  # 0 = no owner notifications
     clock: Callable[[], datetime] = field(default=utc_now)
+    # Webhook dedup; polling never needs it (getUpdates offsets do that job).
+    updates: UpdateLog = field(default_factory=MemoryUpdateLog)
 
 
 # Private chats only, new messages only: edits, channel posts and group chatter
@@ -57,8 +59,14 @@ def build_app(
     token: str,
     request: BaseRequest | None = None,
     get_updates_request: BaseRequest | None = None,
+    post_init: Callable[[Application], Awaitable[None]] | None = None,
+    post_shutdown: Callable[[Application], Awaitable[None]] | None = None,
 ) -> Application:
     builder = Application.builder().token(token)
+    if post_init is not None:
+        builder = builder.post_init(post_init)
+    if post_shutdown is not None:
+        builder = builder.post_shutdown(post_shutdown)
     if request is not None:
         builder = builder.request(request)
     if get_updates_request is not None:

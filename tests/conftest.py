@@ -8,6 +8,7 @@ Application.process_update -> handler registration -> handler code.
 
 import asyncio
 import json
+import os
 import socket
 import time
 from datetime import UTC, datetime, timedelta
@@ -18,9 +19,16 @@ from telegram import Update
 from telegram.request import BaseRequest
 
 from kit.app import Deps, build_app
+from kit.db import make_pool, migrate
 from kit.llm import Answer
 from kit.profile import Profile, load_profile
-from kit.storage import MemoryLeadStore, NewLead
+from kit.storage import (
+    MemoryLeadStore,
+    MemoryUpdateLog,
+    NewLead,
+    PostgresLeadStore,
+    PostgresUpdateLog,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN = "123456:TEST-TOKEN"
@@ -90,9 +98,56 @@ class FakeAnswerer:
         return self.outcome
 
 
+# --- Postgres ------------------------------------------------------------------
+#
+# Every test that uses `store` or `updates` runs twice: on the in-memory
+# implementation and on Postgres. Postgres needs TEST_DATABASE_URL, e.g. the
+# compose `testdb` service:
+#   docker compose --profile test up -d testdb
+#   TEST_DATABASE_URL=postgresql://kit:kit@127.0.0.1:5434/kit_test uv run pytest
+# Without it the Postgres half is skipped, unless KIT_REQUIRE_PG=1 (CI).
+
+PG_URL = os.environ.get("TEST_DATABASE_URL")
+REQUIRE_PG = os.environ.get("KIT_REQUIRE_PG") == "1"
+
+
+def _need_pg() -> str:
+    if PG_URL:
+        return PG_URL
+    if REQUIRE_PG:
+        pytest.fail("KIT_REQUIRE_PG=1 but TEST_DATABASE_URL is not set")
+    pytest.skip("Postgres half: set TEST_DATABASE_URL")
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> str:
+    url = _need_pg()
+    migrate(url)
+    return url
+
+
 @pytest.fixture
-def store() -> MemoryLeadStore:
-    return MemoryLeadStore()
+async def pg_pool(pg_url):
+    pool = make_pool(pg_url, max_size=6)
+    await pool.open(wait=True, timeout=10)
+    async with pool.connection() as conn:
+        await conn.execute("truncate leads, processed_updates restart identity")
+    yield pool
+    await pool.close()
+
+
+@pytest.fixture(params=["memory", "postgres"])
+def store(request):
+    if request.param == "memory":
+        return MemoryLeadStore()
+    return PostgresLeadStore(request.getfixturevalue("pg_pool"))
+
+
+@pytest.fixture(params=["memory", "postgres"])
+def updates(request):
+    if request.param == "memory":
+        return MemoryUpdateLog()
+    return PostgresUpdateLog(request.getfixturevalue("pg_pool"))
 
 
 @pytest.fixture

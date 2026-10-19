@@ -1,9 +1,12 @@
+"""The LeadStore and UpdateLog contracts. The `store` and `updates` fixtures are
+parametrized, so every test here runs on memory and on Postgres."""
+
 import asyncio
 from datetime import timedelta
 
 import pytest
 
-from kit.storage import SlotTaken, TooManyBookings
+from kit.storage import PostgresUpdateLog, SlotTaken, TooManyBookings
 from tests.conftest import MONDAY_NOON, new_lead
 
 TODAY = MONDAY_NOON.date()
@@ -11,6 +14,14 @@ TODAY = MONDAY_NOON.date()
 
 def save(store, lead, capacity=1, max_per_client=100):
     return store.save_lead(lead, capacity=capacity, max_per_client=max_per_client, today=TODAY)
+
+
+async def test_saved_lead_comes_back_with_an_id_and_the_same_fields(store, dental):
+    lead = new_lead(dental, slot_time="09:30")
+    saved = await save(store, lead)
+    assert saved.id > 0 and (saved.phone, saved.status) == (None, "new")
+    for field in ("client_slug", "tg_user_id", "service", "slot_date", "slot_time", "created_at"):
+        assert getattr(saved, field) == getattr(lead, field)
 
 
 async def test_save_refuses_a_full_slot(store, dental):
@@ -48,6 +59,11 @@ async def test_past_bookings_do_not_count_against_the_limit(store, dental):
     await save(store, new_lead(dental, tg_user_id=7), max_per_client=1)
 
 
+async def test_slots_are_counted_per_business(store, dental, school):
+    await save(store, new_lead(dental))
+    await save(store, new_lead(school))  # same day and time, another business
+
+
 async def test_taken_by_time_counts_one_day_in_one_read(store, dental):
     tuesday = TODAY + timedelta(days=1)
     for user_id, time in ((1, "09:00"), (2, "09:00"), (3, "10:00")):
@@ -67,11 +83,24 @@ async def test_phone_goes_to_the_newest_lead_inside_the_window(store, dental):
     assert await store.attach_phone(dental.slug, 8, "+34600000000", MONDAY_NOON) is None
 
 
-async def test_recent_leads_are_per_business_and_newest_first(store, dental, school):
-    for hours in (3, 1, 2):
-        created = MONDAY_NOON - timedelta(hours=hours)
-        await save(store, new_lead(dental, slot_time=f"1{hours}:00", created_at=created))
+async def test_recent_leads_are_per_business_newest_first_and_page_by_id(store, dental, school):
+    for time in ("10:00", "11:00", "12:00"):
+        await save(store, new_lead(dental, slot_time=time))
     await save(store, new_lead(school))
 
-    leads = await store.recent_leads(dental.slug, limit=2)
-    assert [lead.slot_time for lead in leads] == ["11:00", "12:00"]
+    first = await store.recent_leads(dental.slug, limit=2)
+    assert [lead.slot_time for lead in first] == ["12:00", "11:00"]
+    rest = await store.recent_leads(dental.slug, limit=2, before_id=first[-1].id)
+    assert [lead.slot_time for lead in rest] == ["10:00"]
+
+
+async def test_update_log_sees_each_update_once_per_bot(updates):
+    assert await updates.first_time("bot-a", 42) is True
+    assert await updates.first_time("bot-a", 42) is False
+    assert await updates.first_time("bot-b", 42) is True
+
+
+async def test_postgres_update_log_survives_a_restart(pg_pool):
+    assert await PostgresUpdateLog(pg_pool).first_time("bot-a", 7) is True
+    # A new process: a fresh object over the same database.
+    assert await PostgresUpdateLog(pg_pool).first_time("bot-a", 7) is False

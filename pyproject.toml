@@ -8,6 +8,8 @@ license = { text = "MIT" }
 dependencies = [
   "fastapi>=0.120,<1",
   "google-genai==1.50.0",
+  "psycopg-pool>=3.2,<4",
+  "psycopg[binary]>=3.2,<4",
   "pydantic>=2.12,<3",
   "pydantic-settings>=2.12,<3",
   "python-telegram-bot==22.7",

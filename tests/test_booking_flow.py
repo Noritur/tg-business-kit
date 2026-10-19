@@ -70,8 +70,10 @@ class SlowStore(MemoryLeadStore):
         return await super().taken_by_time(client_slug, slot_date)
 
 
-async def test_two_clients_confirming_at_once_get_one_slot(make_bot, dental):
-    store = SlowStore()
+async def test_two_clients_confirming_at_once_get_one_slot(make_bot, dental, store):
+    # Postgres yields on real I/O by itself; the memory store needs SlowStore for that.
+    if isinstance(store, MemoryLeadStore):
+        store = SlowStore()
     bot = await make_bot(dental, store=store)
     confirm = callbacks.booking("c", "chk", TUESDAY, "09:00")
     # Both pass the handler's free-slot check; the store has the final word.

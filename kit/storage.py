@@ -1,14 +1,18 @@
-"""Lead storage behind a small async interface.
+"""Lead storage and the webhook's update log, each behind a small async interface.
 
-Handlers depend on `LeadStore`, not on a database. Phase 1 ships the in-memory
-store for tests and local runs; the Postgres store in phase 3 keeps the same
-contract, including the capacity check inside `save_lead`.
+Handlers depend on `LeadStore` and the web layer on `UpdateLog`, never on a
+database. Two implementations of each: in-memory (tests, a quick demo) and
+Postgres. The test suite runs the same contract tests against both.
 """
 
 import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Protocol
+
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 
 class SlotTaken(Exception):
@@ -59,7 +63,20 @@ class LeadStore(Protocol):
         """Puts the phone on the client's newest lead created after `since`."""
         ...
 
-    async def recent_leads(self, client_slug: str, limit: int = 10) -> list[Lead]: ...
+    async def recent_leads(
+        self, client_slug: str, limit: int = 10, before_id: int | None = None
+    ) -> list[Lead]:
+        """Newest first; `before_id` continues a page (a cursor, not an offset)."""
+        ...
+
+
+class UpdateLog(Protocol):
+    async def first_time(self, bot: str, update_id: int) -> bool:
+        """Records the update and says whether it was new."""
+        ...
+
+
+# --- in memory -----------------------------------------------------------------
 
 
 class MemoryLeadStore:
@@ -121,6 +138,158 @@ class MemoryLeadStore:
                     return self._leads[i]
             return None
 
-    async def recent_leads(self, client_slug: str, limit: int = 10) -> list[Lead]:
-        mine = [lead for lead in self._leads if lead.client_slug == client_slug]
-        return sorted(mine, key=lambda lead: lead.created_at, reverse=True)[:limit]
+    async def recent_leads(
+        self, client_slug: str, limit: int = 10, before_id: int | None = None
+    ) -> list[Lead]:
+        mine = [
+            lead
+            for lead in self._leads
+            if lead.client_slug == client_slug and (before_id is None or lead.id < before_id)
+        ]
+        return sorted(mine, key=lambda lead: lead.id, reverse=True)[:limit]
+
+
+class MemoryUpdateLog:
+    """The last `limit` update_ids per process; forgets on restart."""
+
+    def __init__(self, limit: int = 1000):
+        self._seen: OrderedDict[tuple[str, int], None] = OrderedDict()
+        self._limit = limit
+
+    async def first_time(self, bot: str, update_id: int) -> bool:
+        key = (bot, update_id)
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        if len(self._seen) > self._limit:
+            self._seen.popitem(last=False)
+        return True
+
+
+# --- Postgres --------------------------------------------------------------------
+
+
+_LEAD_COLUMNS = (
+    "id, created_at, client_slug, tg_user_id, tg_username, tg_name, service, service_label,"
+    " slot_date, to_char(slot_time, 'HH24:MI') as slot_time, phone, status"
+)
+
+
+def _lead(row: dict) -> Lead:
+    return Lead(**row)
+
+
+class PostgresLeadStore:
+    def __init__(self, pool: AsyncConnectionPool):
+        self._pool = pool
+
+    async def taken_by_time(self, client_slug: str, slot_date: date) -> dict[str, int]:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "select to_char(slot_time, 'HH24:MI'), count(*) from leads"
+                " where client_slug = %s and slot_date = %s and status <> 'cancelled'"
+                " group by slot_time",
+                (client_slug, slot_date),
+            )
+            return {slot: count for slot, count in await cur.fetchall()}
+
+    async def save_lead(
+        self, lead: NewLead, capacity: int, max_per_client: int, today: date
+    ) -> Lead:
+        async with self._pool.connection() as conn, conn.transaction():
+            # One booking per business at a time: the count and the insert below
+            # cannot interleave with another client's. Bookings of a small
+            # business arrive a few per hour, so the queue costs nothing; a
+            # SERIALIZABLE transaction with retries would work too, at the price
+            # of retry code in every caller.
+            await conn.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"kit:leads:{lead.client_slug}",),
+            )
+            cur = await conn.execute(
+                "select"
+                " count(*) filter (where tg_user_id = %s and slot_date >= %s),"
+                " count(*) filter (where slot_date = %s and slot_time = %s)"
+                " from leads where client_slug = %s and status <> 'cancelled'",
+                (lead.tg_user_id, today, lead.slot_date, lead.slot_time, lead.client_slug),
+            )
+            holding, same_slot = await cur.fetchone()
+            if holding >= max_per_client:
+                raise TooManyBookings(f"user {lead.tg_user_id} holds {holding}")
+            if same_slot >= capacity:
+                raise SlotTaken(f"{lead.slot_date} {lead.slot_time}")
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute(
+                "insert into leads (created_at, client_slug, tg_user_id, tg_username, tg_name,"
+                " service, service_label, slot_date, slot_time)"
+                " values (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                f" returning {_LEAD_COLUMNS}",
+                (
+                    lead.created_at,
+                    lead.client_slug,
+                    lead.tg_user_id,
+                    lead.tg_username,
+                    lead.tg_name,
+                    lead.service,
+                    lead.service_label,
+                    lead.slot_date,
+                    time.fromisoformat(lead.slot_time),
+                ),
+            )
+            return _lead(await cur.fetchone())
+
+    async def attach_phone(
+        self, client_slug: str, tg_user_id: int, phone: str, since: datetime
+    ) -> Lead | None:
+        async with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute(
+                "update leads set phone = %s where id = ("
+                " select id from leads"
+                " where client_slug = %s and tg_user_id = %s and created_at >= %s"
+                " order by created_at desc, id desc limit 1)"
+                f" returning {_LEAD_COLUMNS}",
+                (phone, client_slug, tg_user_id, since),
+            )
+            row = await cur.fetchone()
+            return _lead(row) if row else None
+
+    async def recent_leads(
+        self, client_slug: str, limit: int = 10, before_id: int | None = None
+    ) -> list[Lead]:
+        async with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute(
+                f"select {_LEAD_COLUMNS} from leads"
+                " where client_slug = %s and (%s::bigint is null or id < %s)"
+                " order by id desc limit %s",
+                (client_slug, before_id, before_id, limit),
+            )
+            return [_lead(row) for row in await cur.fetchall()]
+
+
+class PostgresUpdateLog:
+    """Survives restarts and is shared by every instance behind the webhook."""
+
+    CLEANUP_EVERY = 500  # inserts
+    KEEP = "7 days"  # Telegram stops re-delivering long before this
+
+    def __init__(self, pool: AsyncConnectionPool):
+        self._pool = pool
+        self._inserts = 0
+
+    async def first_time(self, bot: str, update_id: int) -> bool:
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                "insert into processed_updates (bot, update_id) values (%s, %s)"
+                " on conflict do nothing returning 1",
+                (bot, update_id),
+            )
+            new = await cur.fetchone() is not None
+            self._inserts += 1
+            if self._inserts % self.CLEANUP_EVERY == 0:
+                await conn.execute(
+                    "delete from processed_updates where received_at < now() - %s::interval",
+                    (self.KEEP,),
+                )
+            return new

@@ -18,8 +18,12 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     admin_user_id: int = 0  # owner's Telegram user id; 0 = no owner notifications
     webhook_secret: SecretStr | None = None  # required by `serve`, unused by polling
+    database_url: SecretStr | None = None  # holds a password; unset = leads in memory
+    admin_api_token: SecretStr | None = None  # unset = /api/leads is switched off
 
-    @field_validator("gemini_api_key", "webhook_secret", mode="before")
+    @field_validator(
+        "gemini_api_key", "webhook_secret", "database_url", "admin_api_token", mode="before"
+    )
     @classmethod
     def _blank_key_is_none(cls, value):
         return value or None
@@ -30,13 +34,26 @@ class Settings(BaseSettings):
         return value or 0
 
 
+class DatabaseSettings(BaseSettings):
+    """What `migrate` needs, and nothing else: no bot token to run a migration."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    database_url: SecretStr | None = None
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _blank_is_none(cls, value):
+        return value or None
+
+
 class SettingsError(Exception):
     """Names the env keys that are missing or invalid, never their values."""
 
 
-def load_settings(env_file: str | Path | None = ".env") -> Settings:
+def load_settings(env_file: str | Path | None = ".env", model: type[BaseSettings] = Settings):
     try:
-        return Settings(_env_file=env_file)
+        return model(_env_file=env_file)
     except ValidationError as e:
         names = ", ".join(sorted({str(err["loc"][0]).upper() for err in e.errors()}))
         raise SettingsError(

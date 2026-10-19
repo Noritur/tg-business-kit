@@ -56,3 +56,12 @@ def test_env_errors_never_echo_other_secrets(tmp_path, monkeypatch, capsys):
     assert main(["run", "--profile", DENTAL]) == 2
     out = capsys.readouterr().out
     assert "must-not-be-printed" not in out and "TELEGRAM_BOT_TOKEN" in out
+
+
+def test_migrate_needs_no_bot_token_only_a_database(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert main(["migrate"]) == 2
+    out = capsys.readouterr().out
+    assert "DATABASE_URL" in out and "TELEGRAM_BOT_TOKEN" not in out
