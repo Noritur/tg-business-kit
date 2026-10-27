@@ -10,6 +10,9 @@ import time
 import pytest
 import sentry_sdk
 from fastapi.testclient import TestClient
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.google_genai import GoogleGenAIIntegration
+from sentry_sdk.integrations.httpx import HttpxIntegration
 from sentry_sdk.transport import Transport
 
 from kit import sentry as kit_sentry
@@ -157,6 +160,15 @@ def test_secret_shaped_values_are_masked_in_events_and_breadcrumbs(events, caplo
     [event] = events
     assert BOT_TOKEN.split(":")[1] not in _payload(event)
     assert any("getMe" in crumb["message"] for crumb in event["breadcrumbs"]["values"])
+
+
+def test_integrations_that_would_carry_the_token_or_client_text_are_off(events):
+    client = sentry_sdk.get_client()
+    assert client.get_integration(HttpxIntegration) is None  # Bot API URLs
+    assert client.get_integration(GoogleGenAIIntegration) is None  # client questions
+    assert client.get_integration(FastApiIntegration) is not None  # requests that crash
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
+    assert kit_sentry.before_breadcrumb({"type": "http", "data": {"url": url}}, {}) is None
 
 
 def test_without_a_dsn_sentry_is_never_initialised(monkeypatch):
