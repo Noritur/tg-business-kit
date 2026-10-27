@@ -1,9 +1,13 @@
 # docker compose up -d --build                    db + migrations + long-polling bot
 # docker compose --profile webhook up -d --build  + webhook server on 127.0.0.1:8000
+# docker compose --profile webhook --profile observability up -d --build webhook prometheus
+#                                                 webhook + Prometheus on 127.0.0.1:9090,
+#                                                 without the polling bot
 # docker compose --profile test up -d testdb      throwaway Postgres for the test suite
 #
 # KIT_PROFILE picks the business, default presets/dental-clinic.json.
-# POSTGRES_PASSWORD comes from .env (scripts/setup_env.py generates it).
+# POSTGRES_PASSWORD and METRICS_TOKEN come from .env (scripts/setup_env.py
+# generates them).
 
 x-kit: &kit
   build: .
@@ -13,6 +17,8 @@ x-kit: &kit
       required: false  # without it the bot exits with a list of missing keys
   environment:
     DATABASE_URL: postgresql://kit:${POSTGRES_PASSWORD:?run scripts/setup_env.py first}@db:5432/kit
+    # One JSON object per line for whatever collects container logs.
+    LOG_FORMAT: ${LOG_FORMAT:-json}
   restart: unless-stopped
   read_only: true
   tmpfs: [/tmp]
@@ -77,6 +83,20 @@ services:
       timeout: 3s
       retries: 3
 
+  # Scrapes the webhook server's /metrics; Grafana or alerting can sit on top.
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: ["observability"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    # The bearer token as a file, never in prometheus.yml or on a command line.
+    secrets: [metrics_token]
+    ports: ["127.0.0.1:9090:9090"]  # localhost only, like the webhook port
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
   # Throwaway database for `pytest`: fixed test-only password, data in tmpfs.
   #   TEST_DATABASE_URL=postgresql://kit:kit@127.0.0.1:5434/kit_test uv run pytest
   testdb:
@@ -91,3 +111,8 @@ services:
 
 volumes:
   pgdata:
+  promdata:
+
+secrets:
+  metrics_token:
+    environment: METRICS_TOKEN
