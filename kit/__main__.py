@@ -50,7 +50,7 @@ def _settings(model=None):
 def _setup(profile_path: str):
     """Profile + env + dependencies, or _SetupError with what to fix.
     Returns (deps, settings, pool); pool is None for the in-memory store."""
-    from kit import logs
+    from kit import logs, sentry
     from kit.app import Deps
     from kit.llm import GeminiAnswerer
     from kit.storage import MemoryLeadStore, MemoryUpdateLog
@@ -64,6 +64,7 @@ def _setup(profile_path: str):
         raise _SetupError("GEMINI_API_KEY is required when modules.ai_answers is on")
     # After settings: LOG_FORMAT lives there, and setup errors are printed, not logged.
     logs.setup(settings.log_format, profile=profile.slug)
+    sentry.setup(settings, profile=profile.slug)
 
     answerer = None
     if profile.modules.ai_answers:

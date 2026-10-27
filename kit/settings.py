@@ -33,6 +33,9 @@ class Settings(_Env):
     database_url: SecretStr | None = None  # holds a password; unset = leads in memory
     admin_api_token: SecretStr | None = None  # unset = /api/leads is switched off
     metrics_token: SecretStr | None = None  # unset = /metrics is switched off
+    sentry_dsn: SecretStr | None = None  # unset = Sentry off, nothing is sent
+    sentry_environment: str | None = None  # unset = "production"
+    sentry_release: str | None = None  # unset = tg-business-kit@<version>
 
     @field_validator(
         "gemini_api_key",
@@ -40,6 +43,9 @@ class Settings(_Env):
         "database_url",
         "admin_api_token",
         "metrics_token",
+        "sentry_dsn",
+        "sentry_environment",
+        "sentry_release",
         mode="before",
     )
     @classmethod
