@@ -93,7 +93,8 @@ services:
     # The bearer token as a file, never in prometheus.yml or on a command line.
     secrets: [metrics_token]
     ports: ["127.0.0.1:9090:9090"]  # localhost only, like the webhook port
-    read_only: true
+    # Not read_only: compose writes an `environment:` secret into the
+    # container as a file, and refuses to on a read-only filesystem.
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
