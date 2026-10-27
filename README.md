@@ -14,6 +14,7 @@ Two demo profiles ship with it: a dental clinic (English) and an online language
 - **Command menu**: `/start /book /prices /faq` for clients, plus `/leads` for the owner, set on every start.
 - **Owner API**: `GET /api/leads` with a bearer token and cursor pagination; OpenAPI at `/api/docs`.
 - **Two ways to run**: long polling (no public URL needed) or a FastAPI webhook server.
+- **Observability**: JSON logs with the update's id, Prometheus metrics behind a token, Sentry with secret and personal-data scrubbing.
 
 ## Architecture
 
@@ -27,6 +28,8 @@ flowchart LR
     app --> llm[Gemini: answers from the profile]
     app -- notifications --> owner[Owner's chat]
     api[GET /api/leads] --> store
+    prom[Prometheus] -- bearer token --> metrics[GET /metrics]
+    app -- ERROR lines --> sentry[Sentry, scrubbed]
 ```
 
 Handlers depend on two small interfaces, `LeadStore` and `UpdateLog`, with an in-memory and a Postgres implementation of each. Dependencies travel in the bot's `bot_data`, not in module globals.
@@ -71,12 +74,37 @@ uv run python scripts/commands_info.py                   # the Menu button, for 
 uv run python scripts/api_leads.py http://127.0.0.1:8000 # GET /api/leads with ADMIN_API_TOKEN
 ```
 
+## Observability
+
+```bash
+uv run python scripts/setup_env.py --generated-only      # adds METRICS_TOKEN
+uv run python scripts/setup_env.py --sentry              # Sentry DSN, hidden input (optional)
+docker compose --profile webhook --profile observability up -d --build webhook prometheus
+```
+
+**Logs.** With `LOG_FORMAT=json` (compose sets it) every line is one JSON object: `ts`, `level`, `logger`, `msg`, `exc`, `update_id`, `profile`. The update id is bound around each update, so every line a handler writes says which update it belongs to. Tokens, bearer tokens, API keys and passwords in URLs are masked in messages and tracebacks. uvicorn's access log is off; each update gets one line with its result and duration.
+
+**Metrics.** `GET /metrics` needs `METRICS_TOKEN` as a bearer token and is off without it: the TLS proxy in front of the webhook forwards every path. Prometheus from the compose profile scrapes it on the internal network, and its UI is on 127.0.0.1:9090.
+
+| metric | labels |
+|---|---|
+| `kit_updates_total` | `result`: processed, duplicate, failed, rejected_secret, rejected_body |
+| `kit_update_duration_seconds` | histogram |
+| `kit_bookings_total` | `result`: created, slot_taken, too_many, error |
+| `kit_llm_requests_total` | `model`, `outcome`: ok, rate_limited, overloaded, bad_schema, error |
+| `kit_build_info` | `version`, `profile` |
+
+Label values come from fixed sets: no user ids, chat ids or text. The server is a single uvicorn process, so `prometheus_client` needs no multiprocess mode. Long polling counts too but has no HTTP server, so only `serve` exposes the numbers.
+
+**Sentry.** Off without `SENTRY_DSN`; nothing is sent and `sentry_sdk.init` is not called. With it, every ERROR line is an event tagged with `update_id` and `profile`, including the failures the webhook answers 200 for. Events carry no request body, cookies, frame variables, secret header or Gemini prompts. Why each of these would leak by default is in [ADR 7](docs/adr/0007-observability-without-leaks.md).
+
 ## How it is tested
 
 - Updates travel the real python-telegram-bot `Application` against a fake Bot API; Gemini is faked; a guard fails any test that opens a connection outside localhost. No secrets are needed to run the suite.
 - Every storage test runs twice, on the in-memory store and on Postgres, against one contract. CI starts Postgres and refuses to skip that half.
 - Concurrency is exercised for real: five simultaneous saves of one slot let exactly one through, and two clients confirming the same slot at once get one booking between them.
 - The suite was checked by mutation: removing the update filter, the capacity check, the business timezone or the database lock each makes it fail.
+- Observability is tested against leaks: secrets and a phone number go into log lines and Sentry events (through a test transport) and must not come out; every webhook outcome must move exactly one counter.
 
 ## Security notes
 
@@ -84,6 +112,7 @@ uv run python scripts/api_leads.py http://127.0.0.1:8000 # GET /api/leads with A
 - Secrets are never printed: settings errors name the missing keys, never values; scripts print statuses only; the bot token never appears on a command line or in logs.
 - Containers run as uid 10001 with a read-only filesystem and `no-new-privileges`. The webhook port is published on 127.0.0.1 only and the database is not published at all.
 - Client messages are not logged, only their length.
+- `/metrics` has its own token, separate from the owner's API token. Sentry events go out without request bodies, secret headers or frame variables, and Prometheus listens on 127.0.0.1 only.
 
 ## Design decisions
 
@@ -93,6 +122,7 @@ uv run python scripts/api_leads.py http://127.0.0.1:8000 # GET /api/leads with A
 4. [An idempotent webhook](docs/adr/0004-idempotent-webhook.md)
 5. [Plain SQL migrations](docs/adr/0005-plain-sql-migrations.md)
 6. [Secrets are never printed](docs/adr/0006-secrets-never-printed.md)
+7. [Observability without leaks](docs/adr/0007-observability-without-leaks.md)
 
 ## Environment
 
@@ -105,6 +135,10 @@ uv run python scripts/api_leads.py http://127.0.0.1:8000 # GET /api/leads with A
 | `DATABASE_URL` | Postgres; set by compose; unset = in-memory store |
 | `POSTGRES_PASSWORD` | the compose database; generated |
 | `ADMIN_API_TOKEN` | `GET /api/leads`; generated; unset = endpoint off |
+| `METRICS_TOKEN` | `GET /metrics` and the compose Prometheus; generated; unset = endpoint off |
+| `SENTRY_DSN` | Sentry; `setup_env.py --sentry`; unset = Sentry off |
+| `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE` | Sentry event fields; default `production`, `tg-business-kit@<version>` |
+| `LOG_FORMAT` | `text` (default) or `json`; compose sets `json` |
 
 ## Roadmap
 
