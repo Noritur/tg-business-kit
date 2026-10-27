@@ -136,11 +136,14 @@ def _serve(profile_path: str, host: str, port: int) -> int:
         raise _SetupError("WEBHOOK_SECRET is required for serve (scripts/setup_env.py makes one)")
     if settings.admin_api_token is None:
         log.warning("ADMIN_API_TOKEN not set: /api/leads is switched off")
+    if settings.metrics_token is None:
+        log.warning("METRICS_TOKEN not set: /metrics is switched off")
     api = create_app(
         deps,
         settings.telegram_bot_token.get_secret_value(),
         settings.webhook_secret.get_secret_value(),
         api_token=settings.admin_api_token.get_secret_value() if settings.admin_api_token else "",
+        metrics_token=settings.metrics_token.get_secret_value() if settings.metrics_token else "",
         on_startup=lambda: _open(pool),
         on_shutdown=lambda: _close(pool),
     )

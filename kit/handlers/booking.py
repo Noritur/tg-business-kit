@@ -11,7 +11,7 @@ from datetime import date
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from kit import callbacks
+from kit import callbacks, metrics
 from kit.handlers.common import button, client_label, deps, edit, notify_owner
 from kit.handlers.menu import back_to_menu_row
 from kit.profile import Profile, Service
@@ -97,6 +97,9 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_bookable(profile, step.day, step.time, now) or step.time not in await _free_times(
         context, step.day
     ):
+        if step.step == "c":
+            # Taken before the tap reached the store; the race is counted below.
+            metrics.BOOKINGS.labels(result="slot_taken").inc()
         await _show_days(query, context, service, notice=t("slot_unavailable"))
         return
 
@@ -137,17 +140,21 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             today=local_today(profile, now),
         )
     except SlotTaken:
+        metrics.BOOKINGS.labels(result="slot_taken").inc()
         await _show_days(query, context, service, notice=t("slot_unavailable"))
         return
     except TooManyBookings:
+        metrics.BOOKINGS.labels(result="too_many").inc()
         markup = InlineKeyboardMarkup([back_to_menu_row(profile)])
         await edit(query, t("too_many_bookings", contact=profile.owner_contact), markup)
         return
     except Exception:
+        metrics.BOOKINGS.labels(result="error").inc()
         log.exception("save_lead failed")
         await edit(query, t("save_failed", contact=profile.owner_contact))
         return
 
+    metrics.BOOKINGS.labels(result="created").inc()
     log.info("lead saved: id=%s service=%s %s %s", saved.id, service.code, step.day, step.time)
     await notify_owner(
         context,

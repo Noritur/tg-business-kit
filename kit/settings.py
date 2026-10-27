@@ -32,9 +32,15 @@ class Settings(_Env):
     webhook_secret: SecretStr | None = None  # required by `serve`, unused by polling
     database_url: SecretStr | None = None  # holds a password; unset = leads in memory
     admin_api_token: SecretStr | None = None  # unset = /api/leads is switched off
+    metrics_token: SecretStr | None = None  # unset = /metrics is switched off
 
     @field_validator(
-        "gemini_api_key", "webhook_secret", "database_url", "admin_api_token", mode="before"
+        "gemini_api_key",
+        "webhook_secret",
+        "database_url",
+        "admin_api_token",
+        "metrics_token",
+        mode="before",
     )
     @classmethod
     def _blank_key_is_none(cls, value):

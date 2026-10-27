@@ -1,3 +1,4 @@
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ from google.genai import errors
 
 import kit.llm as llm
 from kit.llm import Answer, GeminiAnswerer, build_system_prompt
+from tests.conftest import metric
 
 
 class FakeModels:
@@ -50,8 +52,32 @@ async def test_answer_is_parsed(dental):
 
 async def test_rate_limit_moves_to_the_next_model_at_once(dental):
     answerer, models = _answerer([_api_error(429), OK])
+    calls = [("m1", "rate_limited"), ("m2", "ok"), ("m1", "ok")]
+    before = [metric("kit_llm_requests_total", model=m, outcome=o) for m, o in calls]
     assert (await answerer.answer(dental, "bupa?")).reply == "We accept Bupa."
     assert models.models_called == ["m1", "m2"]
+    after = [metric("kit_llm_requests_total", model=m, outcome=o) for m, o in calls]
+    assert [a - b for a, b in zip(after, before, strict=True)] == [1, 1, 0]
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "counted"),
+    [
+        ([_api_error(503), OK], ["overloaded", "ok"]),
+        (["not json", OK], ["bad_schema"]),  # then m2 answers
+        ([_api_error(400)], ["error"]),
+        ([TimeoutError("read timed out")], ["error"]),
+    ],
+    ids=["overloaded", "bad schema", "other API error", "network error"],
+)
+async def test_every_call_is_counted_once_by_outcome(dental, outcomes, counted):
+    answerer, _ = _answerer(outcomes)
+    names = ("ok", "overloaded", "bad_schema", "error")
+    before = {o: metric("kit_llm_requests_total", model="m1", outcome=o) for o in names}
+    with contextlib.suppress(Exception):  # some cases end in an error, on purpose
+        await answerer.answer(dental, "bupa?")
+    after = {o: metric("kit_llm_requests_total", model="m1", outcome=o) for o in names}
+    assert {o: after[o] - before[o] for o in names} == {o: counted.count(o) for o in names}
 
 
 async def test_overload_is_retried_on_the_same_model(dental):

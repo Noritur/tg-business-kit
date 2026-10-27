@@ -18,6 +18,7 @@ import pytest
 from telegram import Update
 from telegram.request import BaseRequest
 
+from kit import metrics
 from kit.app import Deps, build_app
 from kit.db import make_pool, migrate
 from kit.llm import Answer
@@ -46,6 +47,11 @@ BOT_USER = {
     "supports_inline_queries": False,
 }
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", None}
+
+
+def metric(name: str, **labels) -> float:
+    """A sample from the bot's registry; tests compare before and after."""
+    return metrics.REGISTRY.get_sample_value(name, labels) or 0.0
 
 
 # --- network guard -----------------------------------------------------------
