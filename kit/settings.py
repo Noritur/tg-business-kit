@@ -6,14 +6,26 @@ prints the whole input, which means every other secret in .env.
 """
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class _Env(BaseSettings):
+    """What every command reads: the .env file and the log format."""
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    log_format: Literal["text", "json"] = "text"
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _blank_format_is_text(cls, value):
+        return value or "text"
+
+
+class Settings(_Env):
     telegram_bot_token: SecretStr
     gemini_api_key: SecretStr | None = None
     admin_user_id: int = 0  # owner's Telegram user id; 0 = no owner notifications
@@ -34,10 +46,8 @@ class Settings(BaseSettings):
         return value or 0
 
 
-class DatabaseSettings(BaseSettings):
+class DatabaseSettings(_Env):
     """What `migrate` needs, and nothing else: no bot token to run a migration."""
-
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: SecretStr | None = None
 

@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from telegram import Update
 from telegram.request import BaseRequest
 
+from kit import logs
 from kit.app import Deps, build_app
 from kit.commands import register_menu
 
@@ -103,15 +104,14 @@ def create_app(
             log.warning("webhook rejected: body is not a Telegram update")
             return JSONResponse({"error": "bad request"}, status_code=400)
 
-        # Telegram re-sends a delivery it believes failed (a timeout is enough).
-        if not await deps.updates.first_time(deps.profile.slug, update.update_id):
-            log.info("duplicate update_id=%s skipped", update.update_id)
-            return {"ok": True}
-        try:
+        with logs.bind(update_id=update.update_id):
+            # Telegram re-sends a delivery it believes failed (a timeout is enough).
+            if not await deps.updates.first_time(deps.profile.slug, update.update_id):
+                log.info("duplicate update_id=%s skipped", update.update_id)
+                return {"ok": True}
+            # Never raises (KitApplication logs the failure instead). 200 even on
+            # failure: a retry cannot fix a bug, it only repeats it.
             await application.process_update(update)
-        except Exception:
-            log.exception("update_id=%s failed", update.update_id)
-        # 200 even on failure: a retry cannot fix a bug, it only repeats it.
         return {"ok": True}
 
     async def owner_only(

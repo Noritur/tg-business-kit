@@ -3,9 +3,13 @@
 Polling (local) and the webhook (phase 2) both call build_app(), so handler
 registration exists once. Dependencies travel in application.bot_data instead
 of module globals: tests swap them per test, and nothing leaks between bots.
+
+Every update, polled or posted to the webhook, goes through
+KitApplication.process_update: that is where it gets its log context.
 """
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -21,6 +25,7 @@ from telegram.ext import (
 )
 from telegram.request import BaseRequest
 
+from kit import logs
 from kit.commands import register_menu
 from kit.handlers import admin, booking, chat, faq, menu
 from kit.llm import Answerer
@@ -50,6 +55,29 @@ class Deps:
 _PRIVATE_MESSAGES = filters.UpdateType.MESSAGE & filters.ChatType.PRIVATE
 
 
+class KitApplication(Application):
+    """Binds update_id and profile for the update's log lines and never raises:
+    a handler's exception goes to the error handler below (PTB does that), and
+    one raised outside the handlers is logged here. Either way it is an ERROR
+    line, which is what Sentry turns into an event."""
+
+    __slots__ = ()
+
+    async def process_update(self, update: object) -> None:
+        update_id = update.update_id if isinstance(update, Update) else None
+        started = time.perf_counter()
+        with logs.bind(update_id=update_id, profile=self.bot_data["deps"].profile.slug):
+            try:
+                await super().process_update(update)
+            except Exception:
+                log.exception("update_id=%s failed outside the handlers", update_id)
+            log.info(
+                "update_id=%s handled in %d ms",
+                update_id,
+                (time.perf_counter() - started) * 1000,
+            )
+
+
 async def _log_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     update_id = update.update_id if isinstance(update, Update) else None
     log.error("handler failed (update_id=%s)", update_id, exc_info=context.error)
@@ -69,7 +97,12 @@ def build_app(
         # Polling runs post_init; the webhook server calls register_menu itself.
         await register_menu(app.bot, deps.profile, deps.admin_id)
 
-    builder = Application.builder().token(token).post_init(_post_init)
+    builder = (
+        Application.builder()
+        .application_class(KitApplication)
+        .token(token)
+        .post_init(_post_init)
+    )
     if post_shutdown is not None:
         builder = builder.post_shutdown(post_shutdown)
     if request is not None:
