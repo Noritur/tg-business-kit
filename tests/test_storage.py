@@ -2,11 +2,18 @@
 parametrized, so every test here runs on memory and on Postgres."""
 
 import asyncio
+from collections import Counter
 from datetime import timedelta
 
 import pytest
 
-from kit.storage import PostgresUpdateLog, SlotTaken, TooManyBookings
+from kit.storage import (
+    Delivery,
+    MemoryUpdateLog,
+    PostgresUpdateLog,
+    SlotTaken,
+    TooManyBookings,
+)
 from tests.conftest import MONDAY_NOON, new_lead
 
 TODAY = MONDAY_NOON.date()
@@ -94,13 +101,53 @@ async def test_recent_leads_are_per_business_newest_first_and_page_by_id(store, 
     assert [lead.slot_time for lead in rest] == ["10:00"]
 
 
-async def test_update_log_sees_each_update_once_per_bot(updates):
-    assert await updates.first_time("bot-a", 42) is True
-    assert await updates.first_time("bot-a", 42) is False
-    assert await updates.first_time("bot-b", 42) is True
+@pytest.fixture(params=["memory", "postgres"])
+def stale_updates(request):
+    """An update log with a zero window: every unfinished claim is already past it."""
+    if request.param == "memory":
+        return MemoryUpdateLog(stale_after=timedelta(0))
+    return PostgresUpdateLog(request.getfixturevalue("pg_pool"), stale_after=timedelta(0))
+
+
+async def test_update_log_handles_each_update_once_per_bot(updates):
+    assert await updates.claim("bot-a", 42) is Delivery.NEW
+    await updates.finish("bot-a", 42)
+    assert await updates.claim("bot-a", 42) is Delivery.DONE
+    assert await updates.claim("bot-b", 42) is Delivery.NEW
+
+
+async def test_a_redelivery_while_the_attempt_runs_is_in_progress(updates):
+    assert await updates.claim("bot-a", 42) is Delivery.NEW
+    assert await updates.claim("bot-a", 42) is Delivery.IN_PROGRESS
+    await updates.finish("bot-a", 42)
+    assert await updates.claim("bot-a", 42) is Delivery.DONE
+
+
+async def test_an_attempt_that_never_finished_is_handled_again_past_the_window(stale_updates):
+    # The process died mid-handler: a claim and no finish.
+    assert await stale_updates.claim("bot-a", 42) is Delivery.NEW
+    assert await stale_updates.claim("bot-a", 42) is Delivery.ABANDONED
+    await stale_updates.finish("bot-a", 42)
+    # Done stays done, however old the claim.
+    assert await stale_updates.claim("bot-a", 42) is Delivery.DONE
+
+
+async def test_concurrent_deliveries_of_one_update_start_one_attempt(updates):
+    results = await asyncio.gather(*(updates.claim("bot-a", 42) for _ in range(5)))
+    assert Counter(results) == {Delivery.NEW: 1, Delivery.IN_PROGRESS: 4}
 
 
 async def test_postgres_update_log_survives_a_restart(pg_pool):
-    assert await PostgresUpdateLog(pg_pool).first_time("bot-a", 7) is True
+    first = PostgresUpdateLog(pg_pool)
+    assert await first.claim("bot-a", 7) is Delivery.NEW
+    await first.finish("bot-a", 7)
     # A new process: a fresh object over the same database.
-    assert await PostgresUpdateLog(pg_pool).first_time("bot-a", 7) is False
+    assert await PostgresUpdateLog(pg_pool).claim("bot-a", 7) is Delivery.DONE
+
+
+async def test_postgres_claim_of_a_killed_process_is_taken_over_past_the_window(pg_pool):
+    assert await PostgresUpdateLog(pg_pool).claim("bot-a", 7) is Delivery.NEW
+    # Killed mid-handler. The restarted process waits out the window, then takes over.
+    assert await PostgresUpdateLog(pg_pool).claim("bot-a", 7) is Delivery.IN_PROGRESS
+    restarted = PostgresUpdateLog(pg_pool, stale_after=timedelta(0))
+    assert await restarted.claim("bot-a", 7) is Delivery.ABANDONED

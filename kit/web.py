@@ -30,6 +30,7 @@ from telegram.request import BaseRequest
 from kit import __version__, logs, metrics
 from kit.app import Deps, build_app
 from kit.commands import register_menu
+from kit.storage import Delivery
 
 log = logging.getLogger(__name__)
 
@@ -109,25 +110,40 @@ def create_app(
             log.warning("webhook rejected: body is not a Telegram update")
             return JSONResponse({"error": "bad request"}, status_code=400)
 
-        with logs.bind(update_id=update.update_id):
+        slug, update_id = deps.profile.slug, update.update_id
+        with logs.bind(update_id=update_id):
             try:
-                first = await deps.updates.first_time(deps.profile.slug, update.update_id)
+                delivery = await deps.updates.claim(slug, update_id)
             except Exception:
-                # The one 500: Telegram delivers the update again once the
-                # database is back. Logged here, inside bind(), so the line
-                # and the Sentry event carry the update_id; a raise would
-                # reach uvicorn and Sentry after the context is reset.
+                # Telegram delivers the update again once the database is back.
+                # Logged here, inside bind(), so the line and the Sentry event
+                # carry the update_id; a raise would reach uvicorn and Sentry
+                # after the context is reset.
                 metrics.UPDATES.labels(result="failed").inc()
-                log.exception("update_id=%s: deduplication failed, answering 500", update.update_id)
+                log.exception("update_id=%s: deduplication failed, answering 500", update_id)
                 return JSONResponse({"error": "retry later"}, status_code=500)
             # Telegram re-sends a delivery it believes failed (a timeout is enough).
-            if not first:
+            if delivery is Delivery.DONE:
                 metrics.UPDATES.labels(result="duplicate").inc()
-                log.info("duplicate update_id=%s skipped", update.update_id)
+                log.info("duplicate update_id=%s skipped", update_id)
                 return {"ok": True}
-            # Never raises (KitApplication logs the failure instead). 200 even on
-            # failure: a retry cannot fix a bug, it only repeats it.
+            # Not a 200: if the running attempt dies, a later retry is the only
+            # way the update gets handled.
+            if delivery is Delivery.IN_PROGRESS:
+                metrics.UPDATES.labels(result="in_progress").inc()
+                log.info("update_id=%s still in progress, answering 503", update_id)
+                return JSONResponse({"error": "in progress, retry later"}, status_code=503)
+            if delivery is Delivery.ABANDONED:
+                log.warning("update_id=%s: an earlier attempt never finished, retrying", update_id)
+            # Never raises (KitApplication logs the failure instead). Done and
+            # 200 even on failure: a retry cannot fix a bug, it only repeats it.
             await application.process_update(update)
+            try:
+                await deps.updates.finish(slug, update_id)
+            except Exception:
+                # Still a 200: the update was handled, and a re-delivery past
+                # the window would handle it a second time.
+                log.exception("update_id=%s: handled, but not marked done", update_id)
         return {"ok": True}
 
     def bearer_only(expected: str):

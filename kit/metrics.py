@@ -21,7 +21,14 @@ from prometheus_client import (
 
 REGISTRY = CollectorRegistry()
 
-UPDATE_RESULTS = ("processed", "duplicate", "failed", "rejected_secret", "rejected_body")
+UPDATE_RESULTS = (
+    "processed",
+    "duplicate",
+    "in_progress",
+    "failed",
+    "rejected_secret",
+    "rejected_body",
+)
 BOOKING_RESULTS = ("created", "slot_taken", "too_many", "error")
 
 UPDATES = Counter(

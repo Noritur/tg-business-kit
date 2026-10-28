@@ -23,7 +23,7 @@ flowchart LR
     profile[profile.json] --> app
     tg[Telegram] -- long polling --> app
     tg -- webhook + secret header --> web[FastAPI /telegram/webhook]
-    web -- update_id seen once --> app
+    web -- update_id claimed, then done --> app
     app[build_app: handlers] --> store[(Postgres: leads)]
     app --> llm[Gemini: answers from the profile]
     app -- notifications --> owner[Owner's chat]
@@ -89,7 +89,7 @@ GIT_SHA=$(git rev-parse --short HEAD) \
 
 | metric | labels |
 |---|---|
-| `kit_updates_total` | `result`: processed, duplicate, failed, rejected_secret, rejected_body; counts deliveries, so a retried one counts again |
+| `kit_updates_total` | `result`: processed, duplicate, in_progress, failed, rejected_secret, rejected_body; counts deliveries, so a retried one counts again; in_progress is a re-delivery answered 503 while the first attempt runs |
 | `kit_update_duration_seconds` | histogram |
 | `kit_bookings_total` | `result`: created, slot_taken, too_many, error |
 | `kit_llm_requests_total` | `model`, `outcome`: ok, rate_limited, overloaded, bad_schema, error |
@@ -103,7 +103,8 @@ Label values come from fixed sets: no user ids, chat ids or text. The server is 
 
 - Updates travel the real python-telegram-bot `Application` against a fake Bot API; Gemini is faked; a guard fails any test that opens a connection outside localhost. No secrets are needed to run the suite.
 - Every storage test runs twice, on the in-memory store and on Postgres, against one contract. CI starts Postgres and refuses to skip that half.
-- Concurrency is exercised for real: five simultaneous saves of one slot let exactly one through, and two clients confirming the same slot at once get one booking between them.
+- Concurrency is exercised for real: five simultaneous saves of one slot let exactly one through, two clients confirming the same slot at once get one booking between them, and five simultaneous deliveries of one update start one attempt.
+- A crash mid-handler is tested as what it leaves behind, a claim that was never marked done: the re-delivery past the window handles the update, and the one after that is a duplicate.
 - The suite was checked by mutation: removing the update filter, the capacity check, the business timezone or the database lock each makes it fail.
 - Observability is tested against leaks: secrets and a phone number go into log lines and Sentry events (through a test transport) and must not come out; every webhook outcome must move exactly one counter.
 

@@ -8,7 +8,9 @@ Postgres. The test suite runs the same contract tests against both.
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
+from enum import StrEnum
+from time import monotonic
 from typing import Protocol
 
 from psycopg.rows import dict_row
@@ -70,9 +72,29 @@ class LeadStore(Protocol):
         ...
 
 
+class Delivery(StrEnum):
+    """What one delivery of an update is, as the update log sees it."""
+
+    NEW = "new"  # never seen: handle it
+    ABANDONED = "abandoned"  # an attempt never finished within STALE_AFTER: handle it again
+    IN_PROGRESS = "in_progress"  # an attempt is running: Telegram should retry later
+    DONE = "done"  # handled already: skip it
+
+
+# Longer than any handler run (Gemini retries across three models included),
+# or a slow update gets a second attempt next to the first. Also the longest a
+# crashed update waits before a re-delivery handles it again.
+STALE_AFTER = timedelta(minutes=5)
+
+
 class UpdateLog(Protocol):
-    async def first_time(self, bot: str, update_id: int) -> bool:
-        """Records the update and says whether it was new."""
+    async def claim(self, bot: str, update_id: int) -> Delivery:
+        """Starts an attempt unless one is running or the update is done. After
+        NEW or ABANDONED the caller handles the update, then calls finish()."""
+        ...
+
+    async def finish(self, bot: str, update_id: int) -> None:
+        """Marks the update handled: every later delivery is DONE."""
         ...
 
 
@@ -150,20 +172,33 @@ class MemoryLeadStore:
 
 
 class MemoryUpdateLog:
-    """The last `limit` update_ids per process; forgets on restart."""
+    """The last `limit` update_ids per process. A restart forgets the claims
+    with everything else, so the re-delivery after a crash is simply NEW."""
 
-    def __init__(self, limit: int = 1000):
-        self._seen: OrderedDict[tuple[str, int], None] = OrderedDict()
+    def __init__(self, limit: int = 1000, stale_after: timedelta = STALE_AFTER):
+        # (bot, update_id) -> monotonic start of the running attempt, None once done
+        self._claims: OrderedDict[tuple[str, int], float | None] = OrderedDict()
         self._limit = limit
+        self._stale_after = stale_after.total_seconds()
 
-    async def first_time(self, bot: str, update_id: int) -> bool:
-        key = (bot, update_id)
-        if key in self._seen:
-            return False
-        self._seen[key] = None
-        if len(self._seen) > self._limit:
-            self._seen.popitem(last=False)
-        return True
+    async def claim(self, bot: str, update_id: int) -> Delivery:
+        key, now = (bot, update_id), monotonic()
+        if key not in self._claims:
+            delivery = Delivery.NEW
+        elif (started := self._claims[key]) is None:
+            return Delivery.DONE
+        elif now - started < self._stale_after:
+            return Delivery.IN_PROGRESS
+        else:
+            delivery = Delivery.ABANDONED
+        self._claims[key] = now
+        if len(self._claims) > self._limit:
+            self._claims.popitem(last=False)
+        return delivery
+
+    async def finish(self, bot: str, update_id: int) -> None:
+        if (bot, update_id) in self._claims:
+            self._claims[(bot, update_id)] = None
 
 
 # --- Postgres --------------------------------------------------------------------
@@ -271,25 +306,49 @@ class PostgresLeadStore:
 class PostgresUpdateLog:
     """Survives restarts and is shared by every instance behind the webhook."""
 
-    CLEANUP_EVERY = 500  # inserts
+    CLEANUP_EVERY = 500  # claims
     KEEP = "7 days"  # Telegram stops re-delivering long before this
 
-    def __init__(self, pool: AsyncConnectionPool):
+    def __init__(self, pool: AsyncConnectionPool, stale_after: timedelta = STALE_AFTER):
         self._pool = pool
-        self._inserts = 0
+        self._stale_after = stale_after
+        self._claims = 0
 
-    async def first_time(self, bot: str, update_id: int) -> bool:
+    async def claim(self, bot: str, update_id: int) -> Delivery:
         async with self._pool.connection() as conn:
+            # A new row, or a stale attempt taken over. Of two deliveries at once
+            # one waits for the other's row lock, then sees its fresh claimed_at
+            # and gets no row back.
             cur = await conn.execute(
-                "insert into processed_updates (bot, update_id) values (%s, %s)"
-                " on conflict do nothing returning 1",
-                (bot, update_id),
+                "insert into processed_updates as p (bot, update_id) values (%s, %s)"
+                " on conflict (bot, update_id) do update set claimed_at = now()"
+                " where p.done_at is null and p.claimed_at <= now() - %s"
+                # Both default to now() on insert; a take-over moves claimed_at only.
+                " returning p.received_at = p.claimed_at",
+                (bot, update_id, self._stale_after),
             )
-            new = await cur.fetchone() is not None
-            self._inserts += 1
-            if self._inserts % self.CLEANUP_EVERY == 0:
+            claimed = await cur.fetchone()
+            if claimed is not None:
+                delivery = Delivery.NEW if claimed[0] else Delivery.ABANDONED
+            else:
+                cur = await conn.execute(
+                    "select done_at is not null from processed_updates"
+                    " where bot = %s and update_id = %s",
+                    (bot, update_id),
+                )
+                done = await cur.fetchone()
+                delivery = Delivery.DONE if done is not None and done[0] else Delivery.IN_PROGRESS
+            self._claims += 1
+            if self._claims % self.CLEANUP_EVERY == 0:
                 await conn.execute(
                     "delete from processed_updates where received_at < now() - %s::interval",
                     (self.KEEP,),
                 )
-            return new
+            return delivery
+
+    async def finish(self, bot: str, update_id: int) -> None:
+        async with self._pool.connection() as conn:
+            await conn.execute(
+                "update processed_updates set done_at = now() where bot = %s and update_id = %s",
+                (bot, update_id),
+            )
