@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import json
 from types import SimpleNamespace
@@ -6,12 +7,29 @@ import pytest
 from google.genai import errors
 
 import kit.llm as llm
-from kit.llm import Answer, GeminiAnswerer, build_system_prompt
+
+# Imported by name, so the fixtures that patch kit.llm leave these at their real values.
+from kit.llm import (
+    BACKOFF_SECONDS,
+    CALL_TIMEOUT_SECONDS,
+    MODELS,
+    RETRIES_PER_MODEL,
+    Answer,
+    GeminiAnswerer,
+    build_system_prompt,
+)
+from kit.storage import STALE_AFTER
 from tests.conftest import metric
+
+HANG = object()  # a call that does not return in time, like a stalled connection
 
 
 class FakeModels:
-    """Plays back one outcome per call: a dict (sent as JSON), raw text, or an exception."""
+    """Plays back one outcome per call: a dict (sent as JSON), raw text, an exception, or HANG.
+
+    HANG stalls for seconds and then fails the test, so a missing timeout shows up
+    as a failure instead of a suite that never ends.
+    """
 
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -20,6 +38,9 @@ class FakeModels:
     async def generate_content(self, model, contents, config=None):
         self.models_called.append(model)
         outcome = self.outcomes.pop(0)
+        if outcome is HANG:
+            await asyncio.sleep(5)
+            raise AssertionError("a hung call was not cut off")
         if isinstance(outcome, Exception):
             raise outcome
         text = json.dumps(outcome) if isinstance(outcome, dict) else outcome
@@ -39,6 +60,11 @@ def _api_error(code: int) -> errors.APIError:
 @pytest.fixture(autouse=True)
 def _no_backoff(monkeypatch):
     monkeypatch.setattr(llm, "BACKOFF_SECONDS", 0)
+
+
+@pytest.fixture(autouse=True)
+def _short_timeout(monkeypatch):
+    monkeypatch.setattr(llm, "CALL_TIMEOUT_SECONDS", 0.05)
 
 
 OK = {"reply": "We accept Bupa.", "handoff": False}
@@ -66,13 +92,14 @@ async def test_rate_limit_moves_to_the_next_model_at_once(dental):
         ([_api_error(503), OK], ["overloaded", "ok"]),
         (["not json", OK], ["bad_schema"]),  # then m2 answers
         ([_api_error(400)], ["error"]),
-        ([TimeoutError("read timed out")], ["error"]),
+        ([ConnectionResetError("connection reset by peer")], ["error"]),
+        ([HANG, OK], ["timeout"]),  # then m2 answers
     ],
-    ids=["overloaded", "bad schema", "other API error", "network error"],
+    ids=["overloaded", "bad schema", "other API error", "network error", "timeout"],
 )
 async def test_every_call_is_counted_once_by_outcome(dental, outcomes, counted):
     answerer, _ = _answerer(outcomes)
-    names = ("ok", "overloaded", "bad_schema", "error")
+    names = ("ok", "overloaded", "bad_schema", "timeout", "error")
     before = {o: metric("kit_llm_requests_total", model="m1", outcome=o) for o in names}
     with contextlib.suppress(Exception):  # some cases end in an error, on purpose
         await answerer.answer(dental, "bupa?")
@@ -90,6 +117,27 @@ async def test_output_outside_the_schema_moves_on(dental):
     answerer, models = _answerer(["Sure! We accept Bupa.", OK])
     await answerer.answer(dental, "bupa?")
     assert models.models_called == ["m1", "m2"]
+
+
+async def test_a_hung_call_is_cut_off_and_the_next_model_answers(dental):
+    answerer, models = _answerer([HANG, OK])
+    assert (await answerer.answer(dental, "bupa?")).reply == "We accept Bupa."
+    assert models.models_called == ["m1", "m2"]
+
+
+async def test_every_model_hung_raises(dental):
+    answerer, models = _answerer([HANG] * 3)
+    with pytest.raises(RuntimeError, match="all models failed") as caught:
+        await answerer.answer(dental, "bupa?")
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    assert models.models_called == ["m1", "m2", "m3"]
+
+
+def test_the_longest_fallback_run_ends_well_inside_the_claim_window():
+    # Every attempt on every model runs to the timeout and is followed by its backoff.
+    backoff = sum(BACKOFF_SECONDS * (attempt + 1) for attempt in range(RETRIES_PER_MODEL))
+    longest = len(MODELS) * (RETRIES_PER_MODEL * CALL_TIMEOUT_SECONDS + backoff)
+    assert longest < STALE_AFTER.total_seconds() / 2
 
 
 async def test_other_api_errors_are_not_retried(dental):

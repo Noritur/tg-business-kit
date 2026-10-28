@@ -5,8 +5,10 @@ means the facts did not cover the question, and the bot forwards it to the
 owner instead of letting the model guess.
 
 Fallback chain: 429 (the free-tier quota of one model is spent) moves to the
-next model at once; 503 (overloaded) is retried with backoff. The async client
-is used so a slow model never blocks other chats on the same event loop.
+next model at once; 503 (overloaded) is retried with backoff. A call that runs
+past CALL_TIMEOUT_SECONDS is cancelled and moves to the next model as well, so
+the whole chain ends well inside the webhook's claim window (ADR 4). The async
+client is used so a slow model never blocks other chats on the same event loop.
 """
 
 import asyncio
@@ -25,6 +27,12 @@ log = logging.getLogger(__name__)
 MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash"]
 RETRIES_PER_MODEL = 2
 BACKOFF_SECONDS = 1.5
+# A two-to-four sentence answer takes a few seconds; 20 s leaves room for a slow
+# one. At most 3 models x 2 attempts x 20 s + 13.5 s of backoff = 133.5 s, under
+# half of kit.storage.STALE_AFTER. Enforced with asyncio.timeout, not the SDK's
+# HttpOptions.timeout: httpx gets that as a limit per read, so a reply that
+# trickles in never trips it, and with aiohttp it bounds only the connect.
+CALL_TIMEOUT_SECONDS = 20
 RATE_LIMITED = 429
 OVERLOADED = 503
 
@@ -94,9 +102,10 @@ class GeminiAnswerer:
             for attempt in range(RETRIES_PER_MODEL):
                 outcome = "error"
                 try:
-                    result = await self._client.aio.models.generate_content(
-                        model=model, contents=question, config=config
-                    )
+                    async with asyncio.timeout(CALL_TIMEOUT_SECONDS):
+                        result = await self._client.aio.models.generate_content(
+                            model=model, contents=question, config=config
+                        )
                     answer = Answer.model_validate_json(result.text or "")
                     outcome = "ok"
                     return answer
@@ -104,6 +113,12 @@ class GeminiAnswerer:
                     # The model ignored the schema: treat it like a bad model answer.
                     outcome = "bad_schema"
                     log.warning("LLM returned non-schema output (model=%s)", model)
+                    last_error = e
+                    break
+                except TimeoutError as e:
+                    # A hung model is not waited on twice: the next one may answer.
+                    outcome = "timeout"
+                    log.warning("LLM timed out (model=%s), next model", model)
                     last_error = e
                     break
                 except errors.APIError as e:
