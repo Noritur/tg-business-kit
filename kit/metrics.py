@@ -29,7 +29,7 @@ UPDATE_RESULTS = (
     "rejected_secret",
     "rejected_body",
 )
-BOOKING_RESULTS = ("created", "slot_taken", "too_many", "error")
+BOOKING_RESULTS = ("created", "replayed", "slot_taken", "too_many", "error")
 
 UPDATES = Counter(
     "kit_updates",

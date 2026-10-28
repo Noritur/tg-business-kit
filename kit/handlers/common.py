@@ -29,6 +29,18 @@ def client_label(user: User | None) -> str:
     return f"{name} ({handle})"
 
 
+async def answer(query) -> None:
+    """Stops the spinner on the button. Telegram refuses to answer a query once
+    it is old, and the re-delivery of an update whose first attempt died
+    carries an old one: the rest of the handler still has to run."""
+    try:
+        await query.answer()
+    except BadRequest as e:
+        if "query is too old" not in str(e).lower():
+            raise
+        log.info("callback query too old to answer, handling it anyway")
+
+
 async def edit(query, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
     """Edits the message behind a button; a repeated tap that changes nothing
     is not an error."""
