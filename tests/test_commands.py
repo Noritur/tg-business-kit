@@ -79,7 +79,7 @@ async def test_polling_start_registers_the_menu(dental):
     deps = Deps(profile=dental, store=MemoryLeadStore(), answerer=None, admin_id=ADMIN_ID)
     app = build_app(deps, TOKEN, request=request, get_updates_request=FakeTelegramRequest())
     await app.initialize()
-    await app.post_init(app)  # what run_polling() calls after initialize()
+    await app.post_init(app)  # what kit.polling.serve() calls after initialize()
     await app.shutdown()
     assert "default" in menus(request) and "chat" in menus(request)
 

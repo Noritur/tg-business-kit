@@ -48,7 +48,8 @@ class Deps:
     answerer: Answerer | None
     admin_id: int  # 0 = no owner notifications
     clock: Callable[[], datetime] = field(default=utc_now)
-    # Webhook dedup; polling never needs it (getUpdates offsets do that job).
+    # Webhook claims. Polling needs none: kit.polling confirms an update to
+    # Telegram only after handling it, and Telegram keeps it until then.
     updates: UpdateLog = field(default_factory=MemoryUpdateLog)
 
 
@@ -122,7 +123,7 @@ def build_app(
     async def _post_init(app: Application) -> None:
         if post_init is not None:
             await post_init(app)
-        # Polling runs post_init; the webhook server calls register_menu itself.
+        # kit.polling runs post_init; the webhook server calls register_menu itself.
         await register_menu(app.bot, deps.profile, deps.admin_id)
 
     builder = (
