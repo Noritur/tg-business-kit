@@ -98,6 +98,18 @@ services:
       - promdata:/prometheus
     # The bearer token as a file, never in prometheus.yml or on a command line.
     secrets: [metrics_token]
+    # An empty METRICS_TOKEN leaves no secret file at all, and the target page
+    # would only say "no such file". A `:?` guard does not fit: compose checks
+    # it for every profile, the bot-only one included.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        test -s /run/secrets/metrics_token
+        || { echo "METRICS_TOKEN is empty: run scripts/setup_env.py --generated-only" >&2; exit 1; };
+        exec /bin/prometheus "$$@"
+      - --
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
     ports: ["127.0.0.1:9090:9090"]  # localhost only, like the webhook port
     # Not read_only: compose writes an `environment:` secret into the
     # container as a file, and refuses to on a read-only filesystem.
