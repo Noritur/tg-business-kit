@@ -24,6 +24,10 @@ class _Env(BaseSettings):
     def _blank_format_is_text(cls, value):
         return value or "text"
 
+    def secret_values(self) -> list[str]:
+        """Every secret that is set, for kit.logs to mask wherever it turns up."""
+        return [v.get_secret_value() for v in self.__dict__.values() if isinstance(v, SecretStr)]
+
 
 class Settings(_Env):
     telegram_bot_token: SecretStr

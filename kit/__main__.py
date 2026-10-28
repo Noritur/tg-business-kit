@@ -63,7 +63,7 @@ def _setup(profile_path: str):
     if profile.modules.ai_answers and settings.gemini_api_key is None:
         raise _SetupError("GEMINI_API_KEY is required when modules.ai_answers is on")
     # After settings: LOG_FORMAT lives there, and setup errors are printed, not logged.
-    logs.setup(settings.log_format, profile=profile.slug)
+    logs.setup(settings.log_format, profile=profile.slug, secrets=settings.secret_values())
     sentry.setup(settings, profile=profile.slug)
 
     answerer = None
@@ -162,7 +162,7 @@ def _migrate() -> int:
     from kit.settings import DatabaseSettings
 
     settings = _settings(DatabaseSettings)
-    logs.setup(settings.log_format)
+    logs.setup(settings.log_format, secrets=settings.secret_values())
     if settings.database_url is None:
         raise _SetupError("DATABASE_URL is not set: nothing to migrate")
     applied = migrate(settings.database_url.get_secret_value())

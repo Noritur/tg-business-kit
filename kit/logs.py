@@ -10,7 +10,9 @@ tasks, each with its own copy of the context, and bind() resets on the way out.
 Redaction is the second line of defence; ADR 0006 is the first. Whatever is
 shaped like a bot token, a bearer token, a Google API key or the user part of
 a URL (a database password, a Sentry DSN key) is masked in the message and in
-the traceback.
+the traceback. So are the exact values of the secrets the process holds:
+the generated ones (the webhook secret, the API and metrics tokens) are
+random strings no pattern could recognise.
 """
 
 import json
@@ -34,9 +36,15 @@ _SECRETS = [
     # user:password@ in a database URL, the key@ of a Sentry DSN.
     (re.compile(r"://[^/@\s]+@"), f"://{MASK}@"),
 ]
+# The values of the secrets in use, longest first; setup() fills it in.
+_KNOWN: list[str] = []
+# A shorter value would mask ordinary words; real secrets are far longer.
+_MIN_KNOWN = 8
 
 
 def redact(text: str) -> str:
+    for value in _KNOWN:
+        text = text.replace(value, MASK)
     for pattern, replacement in _SECRETS:
         text = pattern.sub(replacement, text)
     return text
@@ -89,10 +97,14 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(line, ensure_ascii=False)
 
 
-def setup(fmt: str = "text", profile: str | None = None) -> None:
+def setup(fmt: str = "text", profile: str | None = None, secrets=()) -> None:
+    """`secrets`: their values are masked from now on (Settings.secret_values)."""
+    _KNOWN[:] = sorted({s for s in secrets if len(s) >= _MIN_KNOWN}, key=len, reverse=True)
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter(profile) if fmt == "json" else TextFormatter())
-    logging.basicConfig(level=logging.INFO, handlers=[handler])
+    # force: whatever configured the root logger first (one module-level
+    # logging.warning() is enough) would keep its own format and no masking.
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     # httpx logs every Bot API URL, and those URLs contain the token.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # google-genai announces "AFC is enabled" on every call.

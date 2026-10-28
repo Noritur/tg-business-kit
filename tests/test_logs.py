@@ -4,6 +4,7 @@ in the message and in the traceback, whichever format is on."""
 import io
 import json
 import logging
+import secrets
 
 import pytest
 
@@ -23,6 +24,8 @@ CASES = {
     "password in a database URL": ("postgresql://kit:pg-Pass-123@db:5432/kit", "pg-Pass-123"),
     "Sentry DSN key": ("https://" + "a" * 32 + "@o1.ingest.sentry.io/2", "a" * 32),
 }
+# What scripts/setup_env.py generates: no pattern can recognise it.
+SHAPELESS = secrets.token_urlsafe(32)
 
 
 @pytest.fixture
@@ -88,6 +91,43 @@ def test_secret_shaped_values_are_masked_in_message_and_traceback(capture, forma
     assert out.count(logs.MASK) >= 2  # the message and the traceback
     if formatter is logs.JsonFormatter:
         assert all(json.loads(line) for line in read())  # masking kept every line valid
+
+
+@pytest.mark.parametrize("formatter", [logs.TextFormatter, logs.JsonFormatter])
+def test_secrets_without_a_shape_are_masked_by_value(capture, formatter):
+    logs.setup(secrets=[SHAPELESS, "short"])  # what _setup passes: Settings.secret_values()
+    read = capture(formatter())
+    log = logging.getLogger("kit.test")
+    log.warning("token=%s note=short", SHAPELESS)
+    try:
+        raise RuntimeError(f"rejected {SHAPELESS}")
+    except RuntimeError:
+        log.exception("again")
+
+    out = "\n".join(read())
+    assert SHAPELESS not in out and out.count(logs.MASK) >= 2
+    assert "note=short" in out  # too short to mask without masking ordinary words
+
+
+def test_settings_hand_every_secret_to_the_masking():
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="123456:TEST-TOKEN",
+        webhook_secret=SHAPELESS,
+        metrics_token="m" * 43,
+        admin_user_id=7,
+    )
+    assert sorted(settings.secret_values()) == sorted(["123456:TEST-TOKEN", SHAPELESS, "m" * 43])
+
+
+def test_setup_takes_over_a_root_logger_configured_before_it():
+    root = logging.getLogger()
+    stray = logging.StreamHandler(io.StringIO())
+    root.addHandler(stray)  # what one module-level logging.warning() leaves behind
+    logs.setup("json")
+    assert stray not in root.handlers
+    assert [h for h in root.handlers if isinstance(h.formatter, logs.JsonFormatter)]
+    assert root.level == logging.INFO
 
 
 def test_ordinary_text_is_left_alone():
