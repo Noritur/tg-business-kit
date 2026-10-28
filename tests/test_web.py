@@ -15,12 +15,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kit.app import Deps
+from kit.metrics import UPDATE_RESULTS
 from kit.storage import MemoryLeadStore, MemoryUpdateLog
 from kit.web import SECRET_HEADER, WEBHOOK_PATH, create_app
-from tests.conftest import ADMIN_ID, CLIENT_ID, MONDAY_NOON, TOKEN, FakeTelegramRequest, new_lead
+from tests.conftest import (
+    ADMIN_ID,
+    CLIENT_ID,
+    MONDAY_NOON,
+    TOKEN,
+    FakeTelegramRequest,
+    metric,
+    new_lead,
+)
 
 SECRET = "test-webhook-secret"
 API_TOKEN = "test-api-token"
+METRICS_TOKEN = "test-metrics-token"
 
 
 @pytest.fixture
@@ -47,15 +57,16 @@ def server(dental, store, answerer):
     """make(secret=...) -> (client, fake Bot API); lifespans closed at teardown."""
     opened = []
 
-    def make(secret: str = SECRET, api_token: str = API_TOKEN):
+    def make(secret: str = SECRET, api_token: str = API_TOKEN, metrics_token: str = METRICS_TOKEN):
         request = FakeTelegramRequest()
         deps = Deps(
             profile=dental, store=store, answerer=answerer, admin_id=ADMIN_ID,
             clock=lambda: MONDAY_NOON,
         )  # fmt: skip
         api = create_app(
-            deps, TOKEN, secret, request, FakeTelegramRequest(), api_token=api_token
-        )
+            deps, TOKEN, secret, request, FakeTelegramRequest(),
+            api_token=api_token, metrics_token=metrics_token,
+        )  # fmt: skip
         client = TestClient(api)
         client.__enter__()
         opened.append(client)
@@ -118,6 +129,7 @@ def test_a_crashing_handler_still_answers_200(server, store, caplog):
 
     store.recent_leads = broken
     client, _ = server()
+    before = _counts()
     with caplog.at_level(logging.ERROR):
         response = client.post(
             WEBHOOK_PATH,
@@ -126,6 +138,24 @@ def test_a_crashing_handler_still_answers_200(server, store, caplog):
         )
     assert response.status_code == 200
     assert "handler failed" in caplog.text
+    assert _delta(before) == {"failed": 1}
+
+
+def test_a_failing_update_log_is_counted_and_answered_500(server, monkeypatch, caplog):
+    async def broken(*args, **kwargs):
+        raise ConnectionError("database is down")
+
+    monkeypatch.setattr(MemoryUpdateLog, "first_time", broken)
+    client, request = server()
+    before = _counts()
+    update = start_update()
+    with caplog.at_level(logging.ERROR):
+        response = client.post(WEBHOOK_PATH, json=update, headers={SECRET_HEADER: SECRET})
+    # A 500, so Telegram delivers the update again once the database is back.
+    assert response.status_code == 500
+    assert f"update_id={update['update_id']}: deduplication failed" in caplog.text
+    assert _delta(before) == {"failed": 1}
+    assert sent(request) == []
 
 
 def test_health_names_the_profile_and_nothing_secret(server):
@@ -147,6 +177,62 @@ async def test_memory_update_log_forgets_the_oldest_beyond_its_limit():
     log = MemoryUpdateLog(limit=2)
     assert [await log.first_time("b", i) for i in (1, 2, 1, 3)] == [True, True, False, True]
     assert await log.first_time("b", 1) is True  # 1 was evicted when 3 arrived
+
+
+# --- metrics -------------------------------------------------------------------
+
+
+def _counts() -> dict[str, float]:
+    return {r: metric("kit_updates_total", result=r) for r in UPDATE_RESULTS}
+
+
+def _delta(before: dict[str, float]) -> dict[str, float]:
+    """Only the results that moved."""
+    return {r: n - before[r] for r, n in _counts().items() if n != before[r]}
+
+
+def test_every_webhook_outcome_is_counted_once(server):
+    client, _ = server()
+    before = _counts()
+    seconds = metric("kit_update_duration_seconds_count")
+    ok = {SECRET_HEADER: SECRET}
+    client.post(WEBHOOK_PATH, json=start_update(update_id=5), headers=ok)
+    client.post(WEBHOOK_PATH, json=start_update(update_id=5), headers=ok)
+    client.post(WEBHOOK_PATH, json=start_update(update_id=6), headers={SECRET_HEADER: "guess"})
+    client.post(
+        WEBHOOK_PATH, content=b"{not json", headers={**ok, "Content-Type": "application/json"}
+    )
+    assert _delta(before) == {
+        "processed": 1, "duplicate": 1, "rejected_secret": 1, "rejected_body": 1,
+    }  # fmt: skip
+    assert metric("kit_update_duration_seconds_count") == seconds + 1  # only the processed one
+
+
+def test_metrics_are_switched_off_without_a_configured_token(server):
+    client, _ = server(metrics_token="")
+    assert client.get("/metrics", headers=_auth("")).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {"Authorization": "Bearer guess"}, {"Authorization": f"Bearer {API_TOKEN}"}]
+)
+def test_metrics_without_their_own_token_are_401(server, headers):
+    client, _ = server()
+    response = client.get("/metrics", headers=headers)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_metrics_with_the_token_name_the_build_and_nothing_secret(server):
+    client, _ = server()
+    response = client.get("/metrics", headers={"Authorization": f"Bearer {METRICS_TOKEN}"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert 'kit_build_info{profile="bright-smile-demo",version="0.1.0"} 1.0' in response.text
+    assert 'kit_updates_total{result="rejected_secret"}' in response.text  # there from the start
+    for secret in (TOKEN, SECRET, API_TOKEN, METRICS_TOKEN):
+        assert secret not in response.text
+    assert "/metrics" not in client.get("/api/openapi.json").json()["paths"]
 
 
 # --- /api/leads ----------------------------------------------------------------

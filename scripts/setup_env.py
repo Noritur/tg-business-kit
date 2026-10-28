@@ -3,6 +3,7 @@ never printed, logged or passed on a command line.
 
     uv run python scripts/setup_env.py                   ask for token, key and owner id
     uv run python scripts/setup_env.py --generated-only  only add missing generated secrets
+    uv run python scripts/setup_env.py --sentry          only ask for the Sentry DSN
 
 Steps: token (checked with getMe) -> Gemini key (optional) -> owner id ->
 generated secrets added if missing -> .env with permissions 600. Other keys
@@ -12,6 +13,7 @@ comment is not kept.
 
 import getpass
 import os
+import re
 import secrets
 import sys
 
@@ -25,10 +27,14 @@ COMMENTS = {
     "WEBHOOK_SECRET": "# Shared secret Telegram sends with every webhook call",
     "POSTGRES_PASSWORD": "# Password of the compose Postgres (docker compose reads it)",
     "ADMIN_API_TOKEN": "# Bearer token for GET /api/leads; empty = endpoint off",
+    "METRICS_TOKEN": "# Bearer token Prometheus sends to GET /metrics; empty = endpoint off",
+    "SENTRY_DSN": "# Sentry DSN; empty = Sentry off, nothing is sent",
 }
 # Made here, never typed by a person. token_urlsafe gives A-Z a-z 0-9 _ -, which
 # Telegram accepts as a webhook secret and needs no escaping inside a URL.
-GENERATED = ("WEBHOOK_SECRET", "POSTGRES_PASSWORD", "ADMIN_API_TOKEN")
+GENERATED = ("WEBHOOK_SECRET", "POSTGRES_PASSWORD", "ADMIN_API_TOKEN", "METRICS_TOKEN")
+# https://<32 hex public key>@<host>/<project id>; self-hosted Sentry may add a path.
+DSN_RE = re.compile(r"^https?://[0-9a-f]{32}@[^/\s]+/(?:[^\s]+/)?\d+$")
 
 
 def bot_username(token: str) -> str | None:
@@ -74,9 +80,29 @@ def generated_only() -> None:
     print(f"[ok]  generated: {', '.join(added) or 'nothing, all present'}")
 
 
+def sentry() -> None:
+    print("Sentry DSN: project settings -> Client Keys (input is hidden; Enter to cancel)")
+    while True:
+        dsn = getpass.getpass("dsn: ").strip()
+        if not dsn:
+            print("[ok]  nothing changed")
+            return
+        if DSN_RE.match(dsn):
+            break
+        # Never echo what was typed: it may be some other secret pasted by mistake.
+        print("[!]   that is not a DSN (https://<key>@<host>/<project id>) - try again")
+    values = read_env()
+    values["SENTRY_DSN"] = dsn
+    write_env(values)
+    print(f"[ok]  {ENV.name} written with permissions 600: SENTRY_DSN=set")
+
+
 def main() -> None:
     if "--generated-only" in sys.argv[1:]:
         generated_only()
+        return
+    if "--sentry" in sys.argv[1:]:
+        sentry()
         return
     print("[1/4] Telegram bot token from @BotFather (input is hidden)")
     token = getpass.getpass("token: ").strip()
@@ -102,7 +128,7 @@ def main() -> None:
     )
     add_generated(values)
     write_env(values)
-    statuses = ", ".join(f"{key}={'set' if values[key] else 'empty'}" for key in COMMENTS)
+    statuses = ", ".join(f"{key}={'set' if values.get(key) else 'empty'}" for key in COMMENTS)
     print(f"[4/4] {ENV.name} written with permissions 600: {statuses}")
 
 

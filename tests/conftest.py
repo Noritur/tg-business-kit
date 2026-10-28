@@ -8,6 +8,7 @@ Application.process_update -> handler registration -> handler code.
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import time
@@ -18,6 +19,7 @@ import pytest
 from telegram import Update
 from telegram.request import BaseRequest
 
+from kit import logs, metrics
 from kit.app import Deps, build_app
 from kit.db import make_pool, migrate
 from kit.llm import Answer
@@ -48,6 +50,11 @@ BOT_USER = {
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", None}
 
 
+def metric(name: str, **labels) -> float:
+    """A sample from the bot's registry; tests compare before and after."""
+    return metrics.REGISTRY.get_sample_value(name, labels) or 0.0
+
+
 # --- network guard -----------------------------------------------------------
 
 
@@ -69,6 +76,35 @@ def _no_network(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+
+
+# --- process-wide state ------------------------------------------------------
+
+# A developer's shell may export these; SENTRY_DSN would start a real client
+# (test_cli reaches sentry.setup) and leave it on for the rest of the run.
+_ENV_FROM_THE_SHELL = (
+    "SENTRY_DSN",
+    "SENTRY_ENVIRONMENT",
+    "SENTRY_RELEASE",
+    "GIT_SHA",
+    "LOG_FORMAT",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_process_state(monkeypatch):
+    """What `python -m kit` sets up for the whole process stays in one test:
+    the env above, the root logger logs.setup() takes over, the masked values."""
+    for key in _ENV_FROM_THE_SHELL:
+        monkeypatch.delenv(key, raising=False)
+    root = logging.getLogger()
+    level = root.level
+    yield
+    ours = (logs.TextFormatter, logs.JsonFormatter)
+    for handler in [h for h in root.handlers if isinstance(h.formatter, ours)]:
+        root.removeHandler(handler)
+    root.setLevel(level)
+    logs._KNOWN.clear()
 
 
 # --- profiles and dependencies -----------------------------------------------

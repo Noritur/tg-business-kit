@@ -38,16 +38,6 @@ class _SetupError(Exception):
     """A startup problem with a message meant for the person running the bot."""
 
 
-def _logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
-    # httpx logs every Bot API URL, and those URLs contain the token.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    # google-genai announces "AFC is enabled" on every call.
-    logging.getLogger("google_genai").setLevel(logging.WARNING)
-
-
 def _settings(model=None):
     from kit.settings import Settings, SettingsError, load_settings
 
@@ -60,22 +50,24 @@ def _settings(model=None):
 def _setup(profile_path: str):
     """Profile + env + dependencies, or _SetupError with what to fix.
     Returns (deps, settings, pool); pool is None for the in-memory store."""
+    from kit import logs, sentry
     from kit.app import Deps
     from kit.llm import GeminiAnswerer
     from kit.storage import MemoryLeadStore, MemoryUpdateLog
-
-    _logging()
 
     try:
         profile = load_profile(profile_path)
     except ProfileError as e:
         raise _SetupError("\n  ".join([f"profile {e.path} is not valid:", *e.problems])) from None
     settings = _settings()
+    if profile.modules.ai_answers and settings.gemini_api_key is None:
+        raise _SetupError("GEMINI_API_KEY is required when modules.ai_answers is on")
+    # After settings: LOG_FORMAT lives there, and setup errors are printed, not logged.
+    logs.setup(settings.log_format, profile=profile.slug, secrets=settings.secret_values())
+    sentry.setup(settings, profile=profile.slug)
 
     answerer = None
     if profile.modules.ai_answers:
-        if settings.gemini_api_key is None:
-            raise _SetupError("GEMINI_API_KEY is required when modules.ai_answers is on")
         answerer = GeminiAnswerer(settings.gemini_api_key.get_secret_value())
     if not settings.admin_user_id:
         log.warning("ADMIN_USER_ID not set: new leads and open questions reach no one")
@@ -145,25 +137,32 @@ def _serve(profile_path: str, host: str, port: int) -> int:
         raise _SetupError("WEBHOOK_SECRET is required for serve (scripts/setup_env.py makes one)")
     if settings.admin_api_token is None:
         log.warning("ADMIN_API_TOKEN not set: /api/leads is switched off")
+    if settings.metrics_token is None:
+        log.warning("METRICS_TOKEN not set: /metrics is switched off")
     api = create_app(
         deps,
         settings.telegram_bot_token.get_secret_value(),
         settings.webhook_secret.get_secret_value(),
         api_token=settings.admin_api_token.get_secret_value() if settings.admin_api_token else "",
+        metrics_token=settings.metrics_token.get_secret_value() if settings.metrics_token else "",
         on_startup=lambda: _open(pool),
         on_shutdown=lambda: _close(pool),
     )
     log.info("webhook server for %s on %s:%s", deps.profile.slug, host, port)
-    uvicorn.run(api, host=host, port=port, log_level="info")
+    # log_config=None: uvicorn's lines go through kit.logs like every other.
+    # No access log: the healthcheck and the Prometheus scrape would fill it,
+    # and each update already gets its own line.
+    uvicorn.run(api, host=host, port=port, log_level="info", log_config=None, access_log=False)
     return 0
 
 
 def _migrate() -> int:
+    from kit import logs
     from kit.db import migrate
     from kit.settings import DatabaseSettings
 
-    _logging()
     settings = _settings(DatabaseSettings)
+    logs.setup(settings.log_format, secrets=settings.secret_values())
     if settings.database_url is None:
         raise _SetupError("DATABASE_URL is not set: nothing to migrate")
     applied = migrate(settings.database_url.get_secret_value())

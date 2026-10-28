@@ -4,7 +4,7 @@ from datetime import date
 
 from kit import callbacks
 from kit.storage import MemoryLeadStore
-from tests.conftest import ADMIN_ID, CLIENT_ID, new_lead, put
+from tests.conftest import ADMIN_ID, CLIENT_ID, metric, new_lead, put
 
 TUESDAY = date(2026, 10, 20)
 
@@ -24,7 +24,9 @@ async def _walk_to_confirm(bot, service="chk", time="09:00"):
 
 async def test_full_flow_saves_one_lead_and_tells_the_owner_once(bot, store, dental):
     confirm = await _walk_to_confirm(bot)
+    created = metric("kit_bookings_total", result="created")
     await bot.send(bot.click(confirm))
+    assert metric("kit_bookings_total", result="created") == created + 1
 
     [lead] = await store.recent_leads(dental.slug)
     assert (lead.service, lead.slot_date, lead.slot_time) == ("chk", TUESDAY, "09:00")
@@ -46,8 +48,10 @@ async def test_slot_taken_while_the_client_was_confirming(bot, store, dental):
     confirm = await _walk_to_confirm(bot)
     # Someone else books the same slot between the confirm screen and the tap.
     await put(store, new_lead(dental, slot_date=TUESDAY, slot_time="09:00"), capacity=1)
+    taken = metric("kit_bookings_total", result="slot_taken")
     await bot.send(bot.click(confirm))
 
+    assert metric("kit_bookings_total", result="slot_taken") == taken + 1
     assert len(await store.recent_leads(dental.slug)) == 1
     assert bot.texts_to(ADMIN_ID) == []
     text, _ = bot.last_screen()
@@ -76,12 +80,15 @@ async def test_two_clients_confirming_at_once_get_one_slot(make_bot, dental, sto
         store = SlowStore()
     bot = await make_bot(dental, store=store)
     confirm = callbacks.booking("c", "chk", TUESDAY, "09:00")
+    before = {r: metric("kit_bookings_total", result=r) for r in ("created", "slot_taken")}
     # Both pass the handler's free-slot check; the store has the final word.
     await asyncio.gather(
         bot.send(bot.click(confirm, user_id=CLIENT_ID)),
         bot.send(bot.click(confirm, user_id=333)),
     )
 
+    after = {r: metric("kit_bookings_total", result=r) for r in before}
+    assert {r: after[r] - before[r] for r in before} == {"created": 1, "slot_taken": 1}
     assert len(await store.recent_leads(dental.slug)) == 1
     assert len(bot.texts_to(ADMIN_ID)) == 1
     screens = [p["text"] for p in bot.calls("editMessageText")]

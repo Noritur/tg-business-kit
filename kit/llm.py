@@ -17,6 +17,7 @@ from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel, ValidationError
 
+from kit import metrics
 from kit.profile import Profile
 
 log = logging.getLogger(__name__)
@@ -91,23 +92,32 @@ class GeminiAnswerer:
         last_error: Exception | None = None
         for model in self.models:
             for attempt in range(RETRIES_PER_MODEL):
+                outcome = "error"
                 try:
                     result = await self._client.aio.models.generate_content(
                         model=model, contents=question, config=config
                     )
-                    return Answer.model_validate_json(result.text or "")
+                    answer = Answer.model_validate_json(result.text or "")
+                    outcome = "ok"
+                    return answer
                 except ValidationError as e:
                     # The model ignored the schema: treat it like a bad model answer.
+                    outcome = "bad_schema"
                     log.warning("LLM returned non-schema output (model=%s)", model)
                     last_error = e
                     break
                 except errors.APIError as e:
                     last_error = e
                     if e.code == RATE_LIMITED:
+                        outcome = "rate_limited"
                         log.warning("LLM rate-limited (model=%s), next model", model)
                         break
                     if e.code != OVERLOADED:
                         raise
+                    outcome = "overloaded"
                     log.warning("LLM overloaded (model=%s attempt=%d)", model, attempt + 1)
                     await asyncio.sleep(BACKOFF_SECONDS * (attempt + 1))
+                finally:
+                    # One count per call; anything not named above is "error".
+                    metrics.LLM_REQUESTS.labels(model=model, outcome=outcome).inc()
         raise RuntimeError("all models failed") from last_error

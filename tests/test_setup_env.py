@@ -79,3 +79,35 @@ def test_generated_only_adds_missing_secrets_without_asking(setup_env, monkeypat
     out = capsys.readouterr().out
     assert "POSTGRES_PASSWORD, ADMIN_API_TOKEN" in out
     assert values["POSTGRES_PASSWORD"] not in out and values["ADMIN_API_TOKEN"] not in out
+
+
+def test_generated_only_also_makes_the_metrics_token(setup_env, monkeypatch, capsys):
+    monkeypatch.setattr(setup_env.sys, "argv", ["setup_env.py", "--generated-only"])
+    setup_env.main()
+    token = setup_env.read_env()["METRICS_TOKEN"]
+    assert len(token) >= 40 and token not in capsys.readouterr().out
+
+
+DSN = "https://" + "ab12" * 8 + "@o4501.ingest.de.sentry.io/4502"
+
+
+def test_sentry_dsn_is_written_and_never_printed(setup_env, monkeypatch, capsys):
+    setup_env.ENV.write_text("TELEGRAM_BOT_TOKEN=keep-me\n")
+    typed = iter(["not-a-dsn", TOKEN, DSN])  # a mistake, another secret pasted, then the DSN
+    monkeypatch.setattr(setup_env.getpass, "getpass", lambda prompt: next(typed))
+    monkeypatch.setattr(setup_env.sys, "argv", ["setup_env.py", "--sentry"])
+    setup_env.main()
+
+    values = setup_env.read_env()
+    assert values["SENTRY_DSN"] == DSN and values["TELEGRAM_BOT_TOKEN"] == "keep-me"
+    out = capsys.readouterr().out
+    assert out.count("not a DSN") == 2 and "SENTRY_DSN=set" in out
+    assert DSN not in out and TOKEN not in out and "not-a-dsn" not in out
+    assert stat.S_IMODE(setup_env.ENV.stat().st_mode) == 0o600
+
+
+def test_sentry_with_nothing_typed_changes_nothing(setup_env, monkeypatch):
+    monkeypatch.setattr(setup_env.getpass, "getpass", lambda prompt: "")
+    monkeypatch.setattr(setup_env.sys, "argv", ["setup_env.py", "--sentry"])
+    setup_env.main()
+    assert not setup_env.ENV.exists()

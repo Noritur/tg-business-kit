@@ -3,10 +3,16 @@
 Polling (local) and the webhook (phase 2) both call build_app(), so handler
 registration exists once. Dependencies travel in application.bot_data instead
 of module globals: tests swap them per test, and nothing leaks between bots.
+
+Every update, polled or posted to the webhook, goes through
+KitApplication.process_update: that is where it gets its log context and
+where its result and duration are counted.
 """
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -21,6 +27,7 @@ from telegram.ext import (
 )
 from telegram.request import BaseRequest
 
+from kit import logs, metrics
 from kit.commands import register_menu
 from kit.handlers import admin, booking, chat, faq, menu
 from kit.llm import Answerer
@@ -50,7 +57,56 @@ class Deps:
 _PRIVATE_MESSAGES = filters.UpdateType.MESSAGE & filters.ChatType.PRIVATE
 
 
+@dataclass
+class _Run:
+    """One update's processing; the error handler marks it failed."""
+
+    failed: bool = False
+
+
+_RUN: ContextVar[_Run | None] = ContextVar("run", default=None)
+
+
+class KitApplication(Application):
+    """Binds update_id and profile for the update's log lines, counts the
+    result and the duration, and never raises: a handler's exception goes to
+    the error handler below (PTB does that), and one raised outside the
+    handlers is logged here. Either way it is an ERROR line, which is what
+    Sentry turns into an event, and the update counts as failed.
+
+    Handlers registered with block=False would be the exception: PTB runs
+    them in a task of their own after this returns, so their failures are
+    logged with the update's context and reach Sentry, but the update is
+    already counted as processed. There are none today."""
+
+    __slots__ = ()
+
+    async def process_update(self, update: object) -> None:
+        update_id = update.update_id if isinstance(update, Update) else None
+        run = _Run()
+        token = _RUN.set(run)
+        started = time.perf_counter()
+        with logs.bind(update_id=update_id, profile=self.bot_data["deps"].profile.slug):
+            try:
+                await super().process_update(update)
+            except Exception:
+                run.failed = True
+                log.exception("update_id=%s failed outside the handlers", update_id)
+            finally:
+                _RUN.reset(token)
+            seconds = time.perf_counter() - started
+            result = "failed" if run.failed else "processed"
+            metrics.UPDATE_SECONDS.observe(seconds)
+            metrics.UPDATES.labels(result=result).inc()
+            log.info("update_id=%s %s in %d ms", update_id, result, seconds * 1000)
+
+
 async def _log_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # The error handler is blocking (PTB's default), so it runs in the task of
+    # the update that failed and sees that update's run.
+    run = _RUN.get()
+    if run is not None:
+        run.failed = True
     update_id = update.update_id if isinstance(update, Update) else None
     log.error("handler failed (update_id=%s)", update_id, exc_info=context.error)
 
@@ -69,7 +125,12 @@ def build_app(
         # Polling runs post_init; the webhook server calls register_menu itself.
         await register_menu(app.bot, deps.profile, deps.admin_id)
 
-    builder = Application.builder().token(token).post_init(_post_init)
+    builder = (
+        Application.builder()
+        .application_class(KitApplication)
+        .token(token)
+        .post_init(_post_init)
+    )
     if post_shutdown is not None:
         builder = builder.post_shutdown(post_shutdown)
     if request is not None:

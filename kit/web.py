@@ -4,8 +4,9 @@
 
 POST /telegram/webhook   Telegram delivers updates; secret header, fail-closed
 GET  /api/leads          the owner's bookings; bearer token, cursor pagination
+GET  /metrics            Prometheus; its own bearer token, off without one
 GET  /health             liveness, nothing secret
-GET  /api/docs           OpenAPI for /api (the webhook is left out of the schema)
+GET  /api/docs           OpenAPI for /api (the webhook and /metrics are left out)
 
 The PTB Application is built once and initialised in the lifespan, not per
 update. The webhook secret travels in a header, so access logs hold nothing
@@ -19,13 +20,14 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from telegram import Update
 from telegram.request import BaseRequest
 
+from kit import __version__, logs, metrics
 from kit.app import Deps, build_app
 from kit.commands import register_menu
 
@@ -65,11 +67,13 @@ def create_app(
     request: BaseRequest | None = None,
     get_updates_request: BaseRequest | None = None,
     api_token: str = "",
+    metrics_token: str = "",
     on_startup: Callable[[], Awaitable[None]] | None = None,
     on_shutdown: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
     application = build_app(deps, token, request=request, get_updates_request=get_updates_request)
     bearer = HTTPBearer(auto_error=False)
+    metrics.BUILD.info({"version": __version__, "profile": deps.profile.slug})
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -95,34 +99,54 @@ def create_app(
     @api.post(WEBHOOK_PATH, include_in_schema=False)
     async def telegram_webhook(request: Request):
         if not _same(request.headers.get(SECRET_HEADER, ""), secret):
+            metrics.UPDATES.labels(result="rejected_secret").inc()
             log.warning("webhook rejected: bad or missing secret token")
             return JSONResponse({"error": "forbidden"}, status_code=403)
         try:
             update = Update.de_json(await request.json(), application.bot)
         except Exception:
+            metrics.UPDATES.labels(result="rejected_body").inc()
             log.warning("webhook rejected: body is not a Telegram update")
             return JSONResponse({"error": "bad request"}, status_code=400)
 
-        # Telegram re-sends a delivery it believes failed (a timeout is enough).
-        if not await deps.updates.first_time(deps.profile.slug, update.update_id):
-            log.info("duplicate update_id=%s skipped", update.update_id)
-            return {"ok": True}
-        try:
+        with logs.bind(update_id=update.update_id):
+            try:
+                first = await deps.updates.first_time(deps.profile.slug, update.update_id)
+            except Exception:
+                # The one 500: Telegram delivers the update again once the
+                # database is back. Logged here, inside bind(), so the line
+                # and the Sentry event carry the update_id; a raise would
+                # reach uvicorn and Sentry after the context is reset.
+                metrics.UPDATES.labels(result="failed").inc()
+                log.exception("update_id=%s: deduplication failed, answering 500", update.update_id)
+                return JSONResponse({"error": "retry later"}, status_code=500)
+            # Telegram re-sends a delivery it believes failed (a timeout is enough).
+            if not first:
+                metrics.UPDATES.labels(result="duplicate").inc()
+                log.info("duplicate update_id=%s skipped", update.update_id)
+                return {"ok": True}
+            # Never raises (KitApplication logs the failure instead). 200 even on
+            # failure: a retry cannot fix a bug, it only repeats it.
             await application.process_update(update)
-        except Exception:
-            log.exception("update_id=%s failed", update.update_id)
-        # 200 even on failure: a retry cannot fix a bug, it only repeats it.
         return {"ok": True}
 
-    async def owner_only(
-        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-    ):
-        if not api_token:
-            raise HTTPException(status_code=404)  # switched off until a token is configured
-        if credentials is None or not _same(credentials.credentials, api_token):
-            raise HTTPException(
-                status_code=401, detail="unauthorized", headers={"WWW-Authenticate": "Bearer"}
-            )
+    def bearer_only(expected: str):
+        """404 while `expected` is empty, 401 without exactly that bearer token."""
+
+        async def check(
+            credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+        ):
+            if not expected:
+                raise HTTPException(status_code=404)  # switched off until a token is configured
+            if credentials is None or not _same(credentials.credentials, expected):
+                raise HTTPException(
+                    status_code=401, detail="unauthorized", headers={"WWW-Authenticate": "Bearer"}
+                )
+
+        return check
+
+    # Separate tokens: whoever scrapes the counters cannot read the bookings.
+    owner_only, scraper_only = bearer_only(api_token), bearer_only(metrics_token)
 
     @api.get("/api/leads", response_model=LeadPage, dependencies=[Depends(owner_only)])
     async def list_leads(
@@ -135,6 +159,12 @@ def create_app(
             leads=[LeadOut.model_validate(lead, from_attributes=True) for lead in leads],
             next_before_id=leads[-1].id if len(leads) == limit else None,
         )
+
+    # Behind a token: the TLS proxy in front of the webhook forwards every path.
+    @api.get("/metrics", include_in_schema=False, dependencies=[Depends(scraper_only)])
+    async def prometheus_metrics():
+        body, content_type = metrics.render()
+        return Response(body, media_type=content_type)
 
     @api.get("/health")
     async def health():

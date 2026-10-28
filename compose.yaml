@@ -1,18 +1,30 @@
 # docker compose up -d --build                    db + migrations + long-polling bot
 # docker compose --profile webhook up -d --build  + webhook server on 127.0.0.1:8000
+# docker compose --profile webhook --profile observability up -d --build webhook prometheus
+#                                                 webhook + Prometheus on 127.0.0.1:9090,
+#                                                 without the polling bot
 # docker compose --profile test up -d testdb      throwaway Postgres for the test suite
 #
 # KIT_PROFILE picks the business, default presets/dental-clinic.json.
-# POSTGRES_PASSWORD comes from .env (scripts/setup_env.py generates it).
+# POSTGRES_PASSWORD and METRICS_TOKEN come from .env (scripts/setup_env.py
+# generates them).
+# GIT_SHA=$(git rev-parse --short HEAD) in front of a --build puts the commit
+# into the image and the Sentry release.
 
 x-kit: &kit
-  build: .
+  build:
+    context: .
+    args: {GIT_SHA: "${GIT_SHA:-}"}
   image: tg-business-kit:local
   env_file:
     - path: .env
       required: false  # without it the bot exits with a list of missing keys
   environment:
     DATABASE_URL: postgresql://kit:${POSTGRES_PASSWORD:?run scripts/setup_env.py first}@db:5432/kit
+    # One JSON object per line for whatever collects container logs.
+    LOG_FORMAT: ${LOG_FORMAT:-json}
+    # This is the bot that serves clients; `uv run` on a laptop is development.
+    SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
   restart: unless-stopped
   read_only: true
   tmpfs: [/tmp]
@@ -77,6 +89,33 @@ services:
       timeout: 3s
       retries: 3
 
+  # Scrapes the webhook server's /metrics; Grafana or alerting can sit on top.
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: ["observability"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    # The bearer token as a file, never in prometheus.yml or on a command line.
+    secrets: [metrics_token]
+    # An empty METRICS_TOKEN leaves no secret file at all, and the target page
+    # would only say "no such file". A `:?` guard does not fit: compose checks
+    # it for every profile, the bot-only one included.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        test -s /run/secrets/metrics_token
+        || { echo "METRICS_TOKEN is empty: run scripts/setup_env.py --generated-only" >&2; exit 1; };
+        exec /bin/prometheus "$$@"
+      - --
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    ports: ["127.0.0.1:9090:9090"]  # localhost only, like the webhook port
+    # Not read_only: compose writes an `environment:` secret into the
+    # container as a file, and refuses to on a read-only filesystem.
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
   # Throwaway database for `pytest`: fixed test-only password, data in tmpfs.
   #   TEST_DATABASE_URL=postgresql://kit:kit@127.0.0.1:5434/kit_test uv run pytest
   testdb:
@@ -91,3 +130,8 @@ services:
 
 volumes:
   pgdata:
+  promdata:
+
+secrets:
+  metrics_token:
+    environment: METRICS_TOKEN

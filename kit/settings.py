@@ -6,23 +6,53 @@ prints the whole input, which means every other secret in .env.
 """
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class _Env(BaseSettings):
+    """What every command reads: the .env file and the log format."""
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    log_format: Literal["text", "json"] = "text"
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _blank_format_is_text(cls, value):
+        return value or "text"
+
+    def secret_values(self) -> list[str]:
+        """Every secret that is set, for kit.logs to mask wherever it turns up."""
+        return [v.get_secret_value() for v in self.__dict__.values() if isinstance(v, SecretStr)]
+
+
+class Settings(_Env):
     telegram_bot_token: SecretStr
     gemini_api_key: SecretStr | None = None
     admin_user_id: int = 0  # owner's Telegram user id; 0 = no owner notifications
     webhook_secret: SecretStr | None = None  # required by `serve`, unused by polling
     database_url: SecretStr | None = None  # holds a password; unset = leads in memory
     admin_api_token: SecretStr | None = None  # unset = /api/leads is switched off
+    metrics_token: SecretStr | None = None  # unset = /metrics is switched off
+    sentry_dsn: SecretStr | None = None  # unset = Sentry off, nothing is sent
+    sentry_environment: str | None = None  # unset = "development"; compose sets production
+    sentry_release: str | None = None  # unset = tg-business-kit@<version>+<git_sha>
+    git_sha: str | None = None  # the commit the image was built from (Dockerfile ARG)
 
     @field_validator(
-        "gemini_api_key", "webhook_secret", "database_url", "admin_api_token", mode="before"
+        "gemini_api_key",
+        "webhook_secret",
+        "database_url",
+        "admin_api_token",
+        "metrics_token",
+        "sentry_dsn",
+        "sentry_environment",
+        "sentry_release",
+        "git_sha",
+        mode="before",
     )
     @classmethod
     def _blank_key_is_none(cls, value):
@@ -34,10 +64,8 @@ class Settings(BaseSettings):
         return value or 0
 
 
-class DatabaseSettings(BaseSettings):
+class DatabaseSettings(_Env):
     """What `migrate` needs, and nothing else: no bot token to run a migration."""
-
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: SecretStr | None = None
 
