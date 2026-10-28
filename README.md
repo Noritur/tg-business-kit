@@ -125,6 +125,7 @@ Label values come from fixed sets: no user ids, chat ids or text. The server is 
 5. [Plain SQL migrations](docs/adr/0005-plain-sql-migrations.md)
 6. [Secrets are never printed](docs/adr/0006-secrets-never-printed.md)
 7. [Observability without leaks](docs/adr/0007-observability-without-leaks.md)
+8. [Long polling confirms an update after handling it](docs/adr/0008-polling-confirms-after-handling.md)
 
 ## Environment
 

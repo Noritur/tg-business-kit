@@ -27,4 +27,4 @@ Two deliveries at once are settled by the database: the second upsert waits for 
 - A slow answer shows up in `getWebhookInfo` as a 503 in `last_error_message`, and in `kit_updates_total{result="in_progress"}`.
 - Not chosen: a lock or transaction held for the whole run, which would notice a dead process at once. It keeps a pool connection busy per running update while the handlers need connections of their own, so a burst of updates would exhaust the pool.
 - The in-memory log loses its claims with the process, so after a crash the re-delivery is simply new.
-- Long polling needs none of this: `getUpdates` offsets already deliver each update once.
+- Long polling needs no claims: Telegram keeps an update until `getUpdates` confirms it, and `kit.polling` confirms it only after handling it ([ADR 8](0008-polling-confirms-after-handling.md)).

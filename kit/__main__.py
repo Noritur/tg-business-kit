@@ -106,6 +106,7 @@ async def _close(pool) -> None:
 
 
 def _run(profile_path: str) -> int:
+    from kit import polling
     from kit.app import build_app
 
     deps, settings, pool = _setup(profile_path)
@@ -123,7 +124,7 @@ def _run(profile_path: str) -> int:
         post_shutdown=post_shutdown,
     )
     log.info("polling as %s (%s)", deps.profile.name, deps.profile.slug)
-    app.run_polling()
+    polling.run(app)
     return 0
 
 
