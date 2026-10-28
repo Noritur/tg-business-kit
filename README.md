@@ -91,7 +91,7 @@ GIT_SHA=$(git rev-parse --short HEAD) \
 |---|---|
 | `kit_updates_total` | `result`: processed, duplicate, in_progress, failed, rejected_secret, rejected_body; counts deliveries, so a retried one counts again; in_progress is a re-delivery answered 503 while the first attempt runs |
 | `kit_update_duration_seconds` | histogram |
-| `kit_bookings_total` | `result`: created, slot_taken, too_many, error |
+| `kit_bookings_total` | `result`: created, replayed, slot_taken, too_many, error |
 | `kit_llm_requests_total` | `model`, `outcome`: ok, rate_limited, overloaded, bad_schema, error |
 | `kit_build_info` | `version`, `profile` |
 
