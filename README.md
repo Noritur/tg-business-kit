@@ -79,16 +79,17 @@ uv run python scripts/api_leads.py http://127.0.0.1:8000 # GET /api/leads with A
 ```bash
 uv run python scripts/setup_env.py --generated-only      # adds METRICS_TOKEN
 uv run python scripts/setup_env.py --sentry              # Sentry DSN, hidden input (optional)
-docker compose --profile webhook --profile observability up -d --build webhook prometheus
+GIT_SHA=$(git rev-parse --short HEAD) \
+  docker compose --profile webhook --profile observability up -d --build webhook prometheus
 ```
 
-**Logs.** With `LOG_FORMAT=json` (compose sets it) every line is one JSON object: `ts`, `level`, `logger`, `msg`, `exc`, `update_id`, `profile`. The update id is bound around each update, so every line a handler writes says which update it belongs to. Tokens, bearer tokens, API keys and passwords in URLs are masked in messages and tracebacks. uvicorn's access log is off; each update gets one line with its result and duration.
+**Logs.** With `LOG_FORMAT=json` (compose sets it) every line is one JSON object: `ts`, `level`, `logger`, `msg`, `exc`, `update_id`, `profile`. The update id is bound around each update, so every line a handler writes says which update it belongs to. Tokens, bearer tokens, API keys and passwords in URLs are masked in messages and tracebacks, and so are the exact values of the secrets the process holds: the generated ones have no shape a pattern could catch. uvicorn's access log is off; each update gets one line with its result and duration.
 
 **Metrics.** `GET /metrics` needs `METRICS_TOKEN` as a bearer token and is off without it: the TLS proxy in front of the webhook forwards every path. Prometheus from the compose profile scrapes it on the internal network, and its UI is on 127.0.0.1:9090.
 
 | metric | labels |
 |---|---|
-| `kit_updates_total` | `result`: processed, duplicate, failed, rejected_secret, rejected_body |
+| `kit_updates_total` | `result`: processed, duplicate, failed, rejected_secret, rejected_body; counts deliveries, so a retried one counts again |
 | `kit_update_duration_seconds` | histogram |
 | `kit_bookings_total` | `result`: created, slot_taken, too_many, error |
 | `kit_llm_requests_total` | `model`, `outcome`: ok, rate_limited, overloaded, bad_schema, error |
@@ -96,7 +97,7 @@ docker compose --profile webhook --profile observability up -d --build webhook p
 
 Label values come from fixed sets: no user ids, chat ids or text. The server is a single uvicorn process, so `prometheus_client` needs no multiprocess mode. Long polling counts too but has no HTTP server, so only `serve` exposes the numbers.
 
-**Sentry.** Off without `SENTRY_DSN`; nothing is sent and `sentry_sdk.init` is not called. With it, every ERROR line is an event tagged with `update_id` and `profile`, including the failures the webhook answers 200 for. Events carry no request body, cookies, frame variables, secret header or Gemini prompts. Why each of these would leak by default is in [ADR 7](docs/adr/0007-observability-without-leaks.md).
+**Sentry.** Off without `SENTRY_DSN`; nothing is sent and `sentry_sdk.init` is not called. With it, every ERROR line is an event tagged with `update_id` and `profile`, including the failures the webhook answers 200 for. Log messages go out as templates, without their arguments, in events and breadcrumbs alike: no user ids, and no objects a library logs. Events carry no request body, cookies, frame variables, secret header or Gemini prompts. The environment is `development` unless set, and compose sets `production`; the release is `tg-business-kit@<version>+<commit>` when the image is built with `GIT_SHA`. Why each of these would leak by default is in [ADR 7](docs/adr/0007-observability-without-leaks.md).
 
 ## How it is tested
 
@@ -110,7 +111,7 @@ Label values come from fixed sets: no user ids, chat ids or text. The server is 
 
 - The webhook secret is a header compared in constant time; an unset secret rejects everything.
 - Secrets are never printed: settings errors name the missing keys, never values; scripts print statuses only; the bot token never appears on a command line or in logs.
-- Containers run as uid 10001 with a read-only filesystem and `no-new-privileges`. The webhook port is published on 127.0.0.1 only and the database is not published at all.
+- The bot's containers run as uid 10001 with a read-only filesystem and `no-new-privileges`. The webhook port is published on 127.0.0.1 only and the database is not published at all.
 - Client messages are not logged, only their length.
 - `/metrics` has its own token, separate from the owner's API token. Sentry events go out without request bodies, secret headers or frame variables, and Prometheus listens on 127.0.0.1 only.
 
@@ -137,7 +138,9 @@ Label values come from fixed sets: no user ids, chat ids or text. The server is 
 | `ADMIN_API_TOKEN` | `GET /api/leads`; generated; unset = endpoint off |
 | `METRICS_TOKEN` | `GET /metrics` and the compose Prometheus; generated; unset = endpoint off |
 | `SENTRY_DSN` | Sentry; `setup_env.py --sentry`; unset = Sentry off |
-| `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE` | Sentry event fields; default `production`, `tg-business-kit@<version>` |
+| `SENTRY_ENVIRONMENT` | Sentry; default `development`, compose sets `production` |
+| `SENTRY_RELEASE` | Sentry; default `tg-business-kit@<version>+<GIT_SHA>` |
+| `GIT_SHA` | build argument, not a `.env` key: `GIT_SHA=$(git rev-parse --short HEAD)` before `docker compose ... --build` |
 | `LOG_FORMAT` | `text` (default) or `json`; compose sets `json` |
 
 ## Roadmap

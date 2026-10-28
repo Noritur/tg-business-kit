@@ -24,7 +24,12 @@ REGISTRY = CollectorRegistry()
 UPDATE_RESULTS = ("processed", "duplicate", "failed", "rejected_secret", "rejected_body")
 BOOKING_RESULTS = ("created", "slot_taken", "too_many", "error")
 
-UPDATES = Counter("kit_updates", "Updates received by result", ["result"], registry=REGISTRY)
+UPDATES = Counter(
+    "kit_updates",
+    "Webhook deliveries and polled updates by result; a retried delivery counts again",
+    ["result"],
+    registry=REGISTRY,
+)
 UPDATE_SECONDS = Histogram(
     "kit_update_duration_seconds",
     "Time to process one update, Bot API and Gemini calls included",

@@ -72,7 +72,12 @@ class KitApplication(Application):
     result and the duration, and never raises: a handler's exception goes to
     the error handler below (PTB does that), and one raised outside the
     handlers is logged here. Either way it is an ERROR line, which is what
-    Sentry turns into an event, and the update counts as failed."""
+    Sentry turns into an event, and the update counts as failed.
+
+    Handlers registered with block=False would be the exception: PTB runs
+    them in a task of their own after this returns, so their failures are
+    logged with the update's context and reach Sentry, but the update is
+    already counted as processed. There are none today."""
 
     __slots__ = ()
 
