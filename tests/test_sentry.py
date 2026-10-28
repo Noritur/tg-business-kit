@@ -129,23 +129,35 @@ def test_a_crashing_handler_is_one_event_without_the_request_secrets(client, sto
         assert value not in raw
 
 
-def test_a_phone_in_the_update_never_reaches_sentry(client, store, events):
+def test_a_phone_and_the_user_id_never_reach_sentry(client, store, events, caplog):
+    caplog.set_level(logging.INFO)  # "chat: user_id=..." becomes a breadcrumb
     store.attach_phone = _down
     client.post(WEBHOOK_PATH, json=_update(PHONE), headers=HEADERS)
 
     [event] = events  # "attach_phone failed"; the bot then answered as usual
     assert event["logentry"]["message"] == "attach_phone failed"
-    assert "671234567" not in _payload(event)
+    crumbs = [crumb["message"] for crumb in event["breadcrumbs"]["values"]]
+    assert "chat: user_id=%s len=%d" in crumbs
+    raw = _payload(event)
+    assert "671234567" not in raw and f"user_id={CLIENT_ID}" not in raw
 
 
-def test_library_log_arguments_stay_out_of_sentry(events):
-    # The shape PTB uses when it cannot build a context for an update.
-    logging.getLogger("telegram.ext.Application").critical(
-        "Error while building CallbackContext for update %s", {"phone": PHONE}
-    )
-    [event] = events
-    assert event["logentry"]["message"].startswith("Error while building CallbackContext")
-    assert PHONE not in _payload(event)
+def test_log_arguments_stay_out_of_events_and_breadcrumbs(events):
+    library = logging.getLogger("telegram.ext.Application")
+    library.warning("Update %s caused a warning", {"phone": PHONE})  # a breadcrumb
+    # The shape PTB uses when it cannot build a context for an update. The
+    # record is an event and also a breadcrumb, which goes with the next event.
+    library.critical("Error while building CallbackContext for update %s", {"phone": PHONE})
+    logging.getLogger("kit.handlers.chat").error("chat failed for user_id=%s", CLIENT_ID)
+
+    first, second = events
+    assert first["logentry"]["message"].startswith("Error while building CallbackContext")
+    assert second["logentry"]["formatted"] == "chat failed for user_id=%s"
+    crumbs = [crumb["message"] for crumb in second["breadcrumbs"]["values"]]
+    assert "Error while building CallbackContext for update %s" in crumbs
+    for event in events:
+        raw = _payload(event)
+        assert PHONE not in raw and f"user_id={CLIENT_ID}" not in raw
 
 
 def test_secret_shaped_values_are_masked_in_events_and_breadcrumbs(events, caplog):

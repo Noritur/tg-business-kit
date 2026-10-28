@@ -20,9 +20,12 @@ every category the SDK collects on its own; the rest is before_send:
   http breadcrumbs are dropped;
 - client questions sent to Gemini -> gen_ai off, the google-genai
   integration off;
-- an Update in a library's log arguments (PTB logs one when it cannot build
-  a context) -> events from other libraries' loggers keep the template only;
-- anything else shaped like a secret -> kit.logs.redact over every string.
+- log arguments: ours are user ids, a library's can be a whole Update (PTB
+  logs one when it cannot build a context) -> every log event and every log
+  breadcrumb keeps the message template only, without arguments or extras.
+  A breadcrumb matters as much as an event: it travels with the next one;
+- anything else shaped like a secret, and the values of the secrets
+  themselves -> kit.logs.redact over every string.
 """
 
 import logging
@@ -84,10 +87,6 @@ def setup(settings: Settings, profile: str | None = None, transport=None) -> boo
     return True
 
 
-def _ours(logger: str) -> bool:
-    return logger == "kit" or logger.startswith("kit.")
-
-
 def before_send(event: dict, hint: dict) -> dict:
     request = event.get("request")
     if request:
@@ -97,10 +96,14 @@ def before_send(event: dict, hint: dict) -> dict:
         request["headers"] = {k: v for k, v in headers.items() if k.lower() not in DROP_HEADERS}
 
     logentry = event.get("logentry")
-    if logentry and not _ours(event.get("logger") or ""):
-        # Our log arguments are ids and counts; a library's can be whole objects.
+    if logentry:
+        # The template only, whoever logged it. The values stay in the local
+        # log lines, and the update_id tag leads to them.
         logentry.pop("params", None)
         logentry["formatted"] = logentry.get("message", "")
+        # Fields a log call passed as extra=; sys.argv is the SDK's own.
+        extra = event.get("extra") or {}
+        event["extra"] = {k: v for k, v in extra.items() if k == "sys.argv"}
 
     tags = event.setdefault("tags", {})
     for name, value in logs.context().items():
@@ -112,6 +115,11 @@ def before_send(event: dict, hint: dict) -> dict:
 def before_breadcrumb(crumb: dict, hint: dict) -> dict | None:
     if crumb.get("type") == "http" or crumb.get("category") in ("httplib", "httpx"):
         return None  # a Bot API URL carries the token
+    record = (hint or {}).get("log_record")
+    if record is not None:
+        # The rule of before_send: a log breadcrumb keeps the template only.
+        crumb["message"] = record.msg if isinstance(record.msg, str) else type(record.msg).__name__
+        crumb.pop("data", None)
     return _redacted(crumb)
 
 
