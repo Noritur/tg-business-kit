@@ -141,16 +141,19 @@ def test_a_crashing_handler_still_answers_200(server, store, caplog):
     assert _delta(before) == {"failed": 1}
 
 
-def test_a_failing_update_log_is_counted_and_left_to_fail(server, monkeypatch):
+def test_a_failing_update_log_is_counted_and_answered_500(server, monkeypatch, caplog):
     async def broken(*args, **kwargs):
         raise ConnectionError("database is down")
 
     monkeypatch.setattr(MemoryUpdateLog, "first_time", broken)
     client, request = server()
     before = _counts()
+    update = start_update()
+    with caplog.at_level(logging.ERROR):
+        response = client.post(WEBHOOK_PATH, json=update, headers={SECRET_HEADER: SECRET})
     # A 500, so Telegram delivers the update again once the database is back.
-    with pytest.raises(ConnectionError):
-        client.post(WEBHOOK_PATH, json=start_update(), headers={SECRET_HEADER: SECRET})
+    assert response.status_code == 500
+    assert f"update_id={update['update_id']}: deduplication failed" in caplog.text
     assert _delta(before) == {"failed": 1}
     assert sent(request) == []
 

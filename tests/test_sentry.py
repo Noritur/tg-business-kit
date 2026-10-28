@@ -18,7 +18,7 @@ from sentry_sdk.transport import Transport
 from kit import sentry as kit_sentry
 from kit.app import Deps
 from kit.settings import Settings
-from kit.storage import MemoryLeadStore
+from kit.storage import MemoryLeadStore, MemoryUpdateLog
 from kit.web import SECRET_HEADER, WEBHOOK_PATH, create_app
 from tests.conftest import ADMIN_ID, CLIENT_ID, MONDAY_NOON, TOKEN, FakeTelegramRequest
 
@@ -131,6 +131,18 @@ def test_a_crashing_handler_is_one_event_without_the_request_secrets(client, sto
     raw = _payload(event)
     for value in (TOKEN, SECRET, "owner-token", "session=abc", "Olena", "Kovalenko"):
         assert value not in raw
+
+
+def test_a_database_outage_in_deduplication_is_one_event_with_its_update_id(
+    client, events, monkeypatch
+):
+    monkeypatch.setattr(MemoryUpdateLog, "first_time", _down)
+    response = client.post(WEBHOOK_PATH, json=_update("hi", update_id=42), headers=HEADERS)
+    assert response.status_code == 500  # Telegram delivers it again later
+
+    [event] = events  # the log line; nothing reaches uvicorn or the FastAPI integration
+    assert event["logger"] == "kit.web" and event["tags"]["update_id"] == "42"
+    assert not {name.lower() for name in event["request"]["headers"]} & kit_sentry.DROP_HEADERS
 
 
 def test_a_phone_and_the_user_id_never_reach_sentry(client, store, events, caplog):

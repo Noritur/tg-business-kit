@@ -113,10 +113,13 @@ def create_app(
             try:
                 first = await deps.updates.first_time(deps.profile.slug, update.update_id)
             except Exception:
-                # Counted and left to fail: the 500 makes Telegram deliver the
-                # update again once the database is back.
+                # The one 500: Telegram delivers the update again once the
+                # database is back. Logged here, inside bind(), so the line
+                # and the Sentry event carry the update_id; a raise would
+                # reach uvicorn and Sentry after the context is reset.
                 metrics.UPDATES.labels(result="failed").inc()
-                raise
+                log.exception("update_id=%s: deduplication failed, answering 500", update.update_id)
+                return JSONResponse({"error": "retry later"}, status_code=500)
             # Telegram re-sends a delivery it believes failed (a timeout is enough).
             if not first:
                 metrics.UPDATES.labels(result="duplicate").inc()
