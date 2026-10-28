@@ -8,15 +8,17 @@ updates go HTTP -> secret check -> dedup -> process_update -> handler -> the
 fake Bot API from conftest.
 """
 
+import asyncio
 import logging
 import time
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from kit.app import Deps
 from kit.metrics import UPDATE_RESULTS
-from kit.storage import MemoryLeadStore, MemoryUpdateLog
+from kit.storage import Delivery, MemoryLeadStore, MemoryUpdateLog
 from kit.web import SECRET_HEADER, WEBHOOK_PATH, create_app
 from tests.conftest import (
     ADMIN_ID,
@@ -57,11 +59,16 @@ def server(dental, store, answerer):
     """make(secret=...) -> (client, fake Bot API); lifespans closed at teardown."""
     opened = []
 
-    def make(secret: str = SECRET, api_token: str = API_TOKEN, metrics_token: str = METRICS_TOKEN):
+    def make(
+        secret: str = SECRET,
+        api_token: str = API_TOKEN,
+        metrics_token: str = METRICS_TOKEN,
+        updates: MemoryUpdateLog | None = None,
+    ):
         request = FakeTelegramRequest()
         deps = Deps(
             profile=dental, store=store, answerer=answerer, admin_id=ADMIN_ID,
-            clock=lambda: MONDAY_NOON,
+            clock=lambda: MONDAY_NOON, updates=updates or MemoryUpdateLog(),
         )  # fmt: skip
         api = create_app(
             deps, TOKEN, secret, request, FakeTelegramRequest(),
@@ -105,10 +112,51 @@ def test_update_travels_to_the_handler_and_back(server):
 
 
 def test_a_redelivered_update_is_handled_once(server):
-    client, request = server()
+    # A zero window: what skips the re-deliveries is "done", not a fresh claim.
+    client, request = server(updates=MemoryUpdateLog(stale_after=timedelta(0)))
+    before = _counts()
     for _ in range(3):
-        client.post(WEBHOOK_PATH, json=start_update(update_id=7), headers={SECRET_HEADER: SECRET})
+        response = client.post(
+            WEBHOOK_PATH, json=start_update(update_id=7), headers={SECRET_HEADER: SECRET}
+        )
+        assert response.status_code == 200
     assert len(sent(request)) == 1
+    assert _delta(before) == {"processed": 1, "duplicate": 2}
+
+
+def test_an_update_a_killed_process_left_unfinished_is_handled_when_redelivered(
+    server, dental, caplog
+):
+    # What a process killed mid-handler leaves behind: a claim with no finish,
+    # by now older than the window.
+    updates = MemoryUpdateLog(stale_after=timedelta(0))
+    asyncio.run(updates.claim(dental.slug, 7))
+    client, request = server(updates=updates)
+    before = _counts()
+    ok = {SECRET_HEADER: SECRET}
+    with caplog.at_level(logging.WARNING):
+        response = client.post(WEBHOOK_PATH, json=start_update(update_id=7), headers=ok)
+    assert response.status_code == 200
+    assert len(sent(request)) == 1
+    assert "update_id=7: an earlier attempt never finished" in caplog.text
+    # Done now: the next re-delivery is a duplicate, past the window or not.
+    client.post(WEBHOOK_PATH, json=start_update(update_id=7), headers=ok)
+    assert len(sent(request)) == 1
+    assert _delta(before) == {"processed": 1, "duplicate": 1}
+
+
+def test_a_redelivery_while_the_first_attempt_runs_is_a_503(server, dental):
+    updates = MemoryUpdateLog()
+    asyncio.run(updates.claim(dental.slug, 7))  # the first attempt, still running
+    client, request = server(updates=updates)
+    before = _counts()
+    response = client.post(
+        WEBHOOK_PATH, json=start_update(update_id=7), headers={SECRET_HEADER: SECRET}
+    )
+    # Telegram retries: by then the first attempt is done, or dead and past the window.
+    assert response.status_code == 503
+    assert sent(request) == []
+    assert _delta(before) == {"in_progress": 1}
 
 
 @pytest.mark.parametrize("body", [b"{not json", b"[1, 2, 3]", b'{"no_update_id": true}'])
@@ -145,7 +193,7 @@ def test_a_failing_update_log_is_counted_and_answered_500(server, monkeypatch, c
     async def broken(*args, **kwargs):
         raise ConnectionError("database is down")
 
-    monkeypatch.setattr(MemoryUpdateLog, "first_time", broken)
+    monkeypatch.setattr(MemoryUpdateLog, "claim", broken)
     client, request = server()
     before = _counts()
     update = start_update()
@@ -156,6 +204,22 @@ def test_a_failing_update_log_is_counted_and_answered_500(server, monkeypatch, c
     assert f"update_id={update['update_id']}: deduplication failed" in caplog.text
     assert _delta(before) == {"failed": 1}
     assert sent(request) == []
+
+
+def test_an_update_handled_but_not_marked_done_still_answers_200(server, monkeypatch, caplog):
+    async def broken(*args, **kwargs):
+        raise ConnectionError("database is down")
+
+    monkeypatch.setattr(MemoryUpdateLog, "finish", broken)
+    client, request = server()
+    before = _counts()
+    with caplog.at_level(logging.ERROR):
+        response = client.post(WEBHOOK_PATH, json=start_update(), headers={SECRET_HEADER: SECRET})
+    # A 500 would bring a re-delivery that, past the window, answers the client twice.
+    assert response.status_code == 200
+    assert len(sent(request)) == 1
+    assert "update_id=1: handled, but not marked done" in caplog.text
+    assert _delta(before) == {"processed": 1}
 
 
 def test_health_names_the_profile_and_nothing_secret(server):
@@ -175,8 +239,9 @@ def test_docs_describe_the_api_but_not_the_webhook(server):
 
 async def test_memory_update_log_forgets_the_oldest_beyond_its_limit():
     log = MemoryUpdateLog(limit=2)
-    assert [await log.first_time("b", i) for i in (1, 2, 1, 3)] == [True, True, False, True]
-    assert await log.first_time("b", 1) is True  # 1 was evicted when 3 arrived
+    new, running = Delivery.NEW, Delivery.IN_PROGRESS
+    assert [await log.claim("b", i) for i in (1, 2, 1, 3)] == [new, new, running, new]
+    assert await log.claim("b", 1) is Delivery.NEW  # 1 was evicted when 3 arrived
 
 
 # --- metrics -------------------------------------------------------------------

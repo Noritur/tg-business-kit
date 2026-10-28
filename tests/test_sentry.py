@@ -136,13 +136,22 @@ def test_a_crashing_handler_is_one_event_without_the_request_secrets(client, sto
 def test_a_database_outage_in_deduplication_is_one_event_with_its_update_id(
     client, events, monkeypatch
 ):
-    monkeypatch.setattr(MemoryUpdateLog, "first_time", _down)
+    monkeypatch.setattr(MemoryUpdateLog, "claim", _down)
     response = client.post(WEBHOOK_PATH, json=_update("hi", update_id=42), headers=HEADERS)
     assert response.status_code == 500  # Telegram delivers it again later
 
     [event] = events  # the log line; nothing reaches uvicorn or the FastAPI integration
     assert event["logger"] == "kit.web" and event["tags"]["update_id"] == "42"
     assert not {name.lower() for name in event["request"]["headers"]} & kit_sentry.DROP_HEADERS
+
+
+def test_an_update_not_marked_done_is_one_event_with_its_update_id(client, events, monkeypatch):
+    monkeypatch.setattr(MemoryUpdateLog, "finish", _down)
+    response = client.post(WEBHOOK_PATH, json=_update("hi", update_id=43), headers=HEADERS)
+    assert response.status_code == 200  # handled; a retry would answer the client twice
+
+    [event] = events
+    assert event["logger"] == "kit.web" and event["tags"]["update_id"] == "43"
 
 
 def test_a_phone_and_the_user_id_never_reach_sentry(client, store, events, caplog):

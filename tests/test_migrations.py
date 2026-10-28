@@ -2,11 +2,13 @@
 
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import psycopg
 import pytest
 
-from kit.db import MIGRATIONS_DIR, migrate
+from kit.db import MIGRATIONS_DIR, make_pool, migrate
+from kit.storage import Delivery, PostgresUpdateLog
 from tests.conftest import _need_pg
 
 ALL = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
@@ -51,3 +53,21 @@ def test_a_failing_migration_leaves_no_trace(schema_url, tmp_path):
         versions = [row[0] for row in conn.execute("select version from schema_migrations")]
         half = conn.execute("select to_regclass('half')").fetchone()[0]
     assert versions == ["001_ok.sql"] and half is None
+
+
+async def test_updates_recorded_before_claims_existed_stay_done(schema_url, tmp_path):
+    for name in ("001_leads.sql", "002_processed_updates.sql"):
+        (tmp_path / name).write_text((MIGRATIONS_DIR / name).read_text())
+    migrate(schema_url, tmp_path)
+    with psycopg.connect(schema_url) as conn:
+        conn.execute("insert into processed_updates (bot, update_id) values ('bot-a', 7)")
+    assert migrate(schema_url) == ["003_update_claims.sql"]
+
+    pool = make_pool(schema_url)
+    await pool.open(wait=True, timeout=10)
+    try:
+        # A zero window: only done_at keeps the old row from being handled again.
+        log = PostgresUpdateLog(pool, stale_after=timedelta(0))
+        assert await log.claim("bot-a", 7) is Delivery.DONE
+    finally:
+        await pool.close()
