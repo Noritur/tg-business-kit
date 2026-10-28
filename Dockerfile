@@ -25,6 +25,10 @@ COPY presets ./presets
 COPY migrations ./migrations
 
 RUN useradd --create-home --uid 10001 app
+# The commit for the Sentry release; compose passes it. Last, because it
+# changes with every commit and would rebuild every layer after it.
+ARG GIT_SHA=""
+ENV GIT_SHA=$GIT_SHA
 USER app
 
 EXPOSE 8000

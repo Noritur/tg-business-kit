@@ -41,6 +41,11 @@ def _settings(**env) -> Settings:
     return Settings(_env_file=None, telegram_bot_token=TOKEN, **env)
 
 
+def _stop():
+    sentry_sdk.get_client().close()
+    sentry_sdk.get_global_scope().set_client(None)  # back to a client that records nothing
+
+
 @pytest.fixture
 def events():
     transport = Collect()
@@ -50,8 +55,7 @@ def events():
         transport=transport,
     )
     yield transport.events
-    sentry_sdk.get_client().close()
-    sentry_sdk.get_global_scope().set_client(None)  # back to a client that records nothing
+    _stop()
 
 
 @pytest.fixture
@@ -181,6 +185,23 @@ def test_integrations_that_would_carry_the_token_or_client_text_are_off(events):
     assert client.get_integration(FastApiIntegration) is not None  # requests that crash
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
     assert kit_sentry.before_breadcrumb({"type": "http", "data": {"url": url}}, {}) is None
+
+
+@pytest.mark.parametrize(
+    ("env", "environment", "release"),
+    [
+        ({}, "development", "tg-business-kit@0.1.0"),  # `uv run` on a laptop
+        ({"git_sha": "abc1234"}, "development", "tg-business-kit@0.1.0+abc1234"),
+        ({"sentry_environment": "production", "sentry_release": "r9"}, "production", "r9"),
+    ],
+)
+def test_environment_and_release(env, environment, release):
+    assert kit_sentry.setup(_settings(sentry_dsn=DSN, **env), transport=Collect())
+    try:
+        options = sentry_sdk.get_client().options
+        assert (options["environment"], options["release"]) == (environment, release)
+    finally:
+        _stop()
 
 
 def test_without_a_dsn_sentry_is_never_initialised(monkeypatch):

@@ -38,8 +38,9 @@ class Settings(_Env):
     admin_api_token: SecretStr | None = None  # unset = /api/leads is switched off
     metrics_token: SecretStr | None = None  # unset = /metrics is switched off
     sentry_dsn: SecretStr | None = None  # unset = Sentry off, nothing is sent
-    sentry_environment: str | None = None  # unset = "production"
-    sentry_release: str | None = None  # unset = tg-business-kit@<version>
+    sentry_environment: str | None = None  # unset = "development"; compose sets production
+    sentry_release: str | None = None  # unset = tg-business-kit@<version>+<git_sha>
+    git_sha: str | None = None  # the commit the image was built from (Dockerfile ARG)
 
     @field_validator(
         "gemini_api_key",
@@ -50,6 +51,7 @@ class Settings(_Env):
         "sentry_dsn",
         "sentry_environment",
         "sentry_release",
+        "git_sha",
         mode="before",
     )
     @classmethod

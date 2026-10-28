@@ -65,11 +65,17 @@ def setup(settings: Settings, profile: str | None = None, transport=None) -> boo
     if settings.sentry_dsn is None:
         log.info("sentry: off (SENTRY_DSN not set)")
         return False
-    environment = settings.sentry_environment or "production"
+    # A run on a laptop must not pass for production; compose says production.
+    environment = settings.sentry_environment or "development"
+    # The commit tells two builds of one version apart, so a bug that comes
+    # back after a fix shows up as a regression in the newer release.
+    release = settings.sentry_release or f"tg-business-kit@{__version__}" + (
+        f"+{settings.git_sha}" if settings.git_sha else ""
+    )
     sentry_sdk.init(
         dsn=settings.sentry_dsn.get_secret_value(),
         environment=environment,
-        release=settings.sentry_release or f"tg-business-kit@{__version__}",
+        release=release,
         data_collection=DATA_COLLECTION,
         max_request_body_size="never",
         integrations=[LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)],
@@ -83,7 +89,7 @@ def setup(settings: Settings, profile: str | None = None, transport=None) -> boo
     ignore_logger("uvicorn.error")
     if profile:
         sentry_sdk.get_global_scope().set_tag("profile", profile)
-    log.info("sentry: on (environment=%s)", environment)
+    log.info("sentry: on (environment=%s, release=%s)", environment, release)
     return True
 
 

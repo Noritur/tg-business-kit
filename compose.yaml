@@ -8,9 +8,13 @@
 # KIT_PROFILE picks the business, default presets/dental-clinic.json.
 # POSTGRES_PASSWORD and METRICS_TOKEN come from .env (scripts/setup_env.py
 # generates them).
+# GIT_SHA=$(git rev-parse --short HEAD) in front of a --build puts the commit
+# into the image and the Sentry release.
 
 x-kit: &kit
-  build: .
+  build:
+    context: .
+    args: {GIT_SHA: "${GIT_SHA:-}"}
   image: tg-business-kit:local
   env_file:
     - path: .env
@@ -19,6 +23,8 @@ x-kit: &kit
     DATABASE_URL: postgresql://kit:${POSTGRES_PASSWORD:?run scripts/setup_env.py first}@db:5432/kit
     # One JSON object per line for whatever collects container logs.
     LOG_FORMAT: ${LOG_FORMAT:-json}
+    # This is the bot that serves clients; `uv run` on a laptop is development.
+    SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
   restart: unless-stopped
   read_only: true
   tmpfs: [/tmp]
