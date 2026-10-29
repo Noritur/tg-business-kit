@@ -92,7 +92,7 @@ GIT_SHA=$(git rev-parse --short HEAD) \
 | `kit_updates_total` | `result`: processed, duplicate, in_progress, failed, rejected_secret, rejected_body; counts deliveries, so a retried one counts again; in_progress is a re-delivery answered 503 while the first attempt runs |
 | `kit_update_duration_seconds` | histogram |
 | `kit_bookings_total` | `result`: created, replayed, slot_taken, too_many, error |
-| `kit_llm_requests_total` | `model`, `outcome`: ok, rate_limited, overloaded, bad_schema, error |
+| `kit_llm_requests_total` | `model`, `outcome`: ok, rate_limited, overloaded, bad_schema, timeout, error; timeout is a call cut off after 20 s, and the next model is tried |
 | `kit_build_info` | `version`, `profile` |
 
 Label values come from fixed sets: no user ids, chat ids or text. The server is a single uvicorn process, so `prometheus_client` needs no multiprocess mode. Long polling counts too but has no HTTP server, so only `serve` exposes the numbers.
@@ -125,6 +125,7 @@ Label values come from fixed sets: no user ids, chat ids or text. The server is 
 5. [Plain SQL migrations](docs/adr/0005-plain-sql-migrations.md)
 6. [Secrets are never printed](docs/adr/0006-secrets-never-printed.md)
 7. [Observability without leaks](docs/adr/0007-observability-without-leaks.md)
+8. [Long polling confirms an update after handling it](docs/adr/0008-polling-confirms-after-handling.md)
 
 ## Environment
 
