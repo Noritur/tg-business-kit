@@ -8,7 +8,7 @@ Two clients can confirm the same slot within milliseconds, and one client could 
 
 ## Decision
 
-`LeadStore.save_lead` decides, in one step, whether the lead may be saved: it checks the slot's capacity and the client's number of upcoming bookings and inserts, or raises `SlotTaken` / `TooManyBookings`. In Postgres the step is a transaction that first takes `pg_advisory_xact_lock` on the business, so bookings of one business are serialised. The in-memory store does the same under an `asyncio.Lock`. The handler still checks free slots to draw the buttons, but the store has the final word.
+`LeadStore.save_lead` decides, in one step, whether the lead may be saved: it checks the slot's capacity and the client's number of upcoming bookings and inserts, or raises `SlotTaken` / `TooManyBookings`. In Postgres the step is a transaction that first takes `pg_advisory_xact_lock` on the business, so bookings of one business are serialised. The in-memory store does the same under an `asyncio.Lock`. The handler still checks free slots to draw the buttons, but the store has the final word. Under the same lock it first looks for a lead saved by the same confirm tap and returns that one unchecked: the tap was delivered again (ADR 4), it is not a second booking.
 
 ## Alternatives considered
 

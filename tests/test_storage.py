@@ -53,6 +53,34 @@ async def test_concurrent_saves_of_one_slot_let_exactly_one_through(store, denta
     assert sum(isinstance(r, SlotTaken) for r in results) == 4
 
 
+async def test_the_same_tap_saved_again_returns_its_lead_unchecked(store, dental):
+    lead = new_lead(dental, tg_query_id="tap-1")
+    first = await save(store, lead)
+    # The slot is full and the client at the limit by now; a new booking would fail both.
+    assert await save(store, lead, capacity=1, max_per_client=1) == first
+    assert await store.recent_leads(dental.slug) == [first]
+
+
+async def test_concurrent_saves_of_one_tap_store_one_lead(store, dental):
+    lead = new_lead(dental, tg_query_id="tap-1")
+    results = await asyncio.gather(*(save(store, lead, capacity=5) for _ in range(5)))
+    assert len({saved.id for saved in results}) == 1
+    assert len(await store.recent_leads(dental.slug)) == 1
+
+
+async def test_a_tap_finds_its_lead_in_its_own_business_only(store, dental, school):
+    first = await save(store, new_lead(dental, tg_query_id="tap-1"))
+    assert await store.lead_by_query(dental.slug, "tap-1") == first
+    assert await store.lead_by_query(dental.slug, "tap-2") is None
+    assert await store.lead_by_query(school.slug, "tap-1") is None
+
+
+async def test_leads_without_a_tap_are_never_taken_for_each_other(store, dental):
+    for user_id in (1, 2):
+        await save(store, new_lead(dental, tg_user_id=user_id, tg_query_id=None), capacity=2)
+    assert len(await store.recent_leads(dental.slug)) == 2
+
+
 async def test_one_client_cannot_hold_the_whole_calendar(store, dental):
     for time in ("09:00", "10:00"):
         await save(store, new_lead(dental, tg_user_id=7, slot_time=time), max_per_client=2)

@@ -7,6 +7,7 @@ Application.process_update -> handler registration -> handler code.
 """
 
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -191,7 +192,11 @@ def answerer() -> FakeAnswerer:
     return FakeAnswerer()
 
 
+_QUERY_IDS = itertools.count(1)
+
+
 def new_lead(profile: Profile, **overrides) -> NewLead:
+    """Each lead comes from a tap of its own unless `tg_query_id` says otherwise."""
     fields = {
         "client_slug": profile.slug,
         "tg_user_id": 222,
@@ -202,6 +207,7 @@ def new_lead(profile: Profile, **overrides) -> NewLead:
         "slot_date": MONDAY_NOON.date() + timedelta(days=1),
         "slot_time": "09:00",
         "created_at": MONDAY_NOON - timedelta(hours=1),
+        "tg_query_id": f"q{next(_QUERY_IDS)}",
     }
     return NewLead(**{**fields, **overrides})
 

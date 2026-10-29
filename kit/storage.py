@@ -36,6 +36,7 @@ class NewLead:
     slot_date: date
     slot_time: str  # "HH:MM", business timezone
     created_at: datetime
+    tg_query_id: str | None  # the confirm tap; None on leads from before migration 004
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,13 @@ class LeadStore(Protocol):
         """Saves the lead or raises SlotTaken / TooManyBookings. Checks and
         insert are one step: two clients confirming the same slot at once must
         not both get it, and one client must not hold the whole calendar.
-        `today` is the business-local date: leads from it on count as upcoming."""
+        `today` is the business-local date: leads from it on count as upcoming.
+        A lead already saved for `lead.tg_query_id` is returned as it is, with
+        no checks: that is the same tap delivered again, not a new booking."""
+        ...
+
+    async def lead_by_query(self, client_slug: str, tg_query_id: str) -> Lead | None:
+        """The lead a confirm tap created, if it created one."""
         ...
 
     async def attach_phone(
@@ -126,6 +133,10 @@ class MemoryLeadStore:
         self, lead: NewLead, capacity: int, max_per_client: int, today: date
     ) -> Lead:
         async with self._lock:
+            if lead.tg_query_id is not None and (
+                saved := await self.lead_by_query(lead.client_slug, lead.tg_query_id)
+            ):
+                return saved
             active = self._active(lead.client_slug)
             holding = [
                 other
@@ -144,6 +155,12 @@ class MemoryLeadStore:
             saved = Lead(**vars(lead), id=len(self._leads) + 1)
             self._leads.append(saved)
             return saved
+
+    async def lead_by_query(self, client_slug: str, tg_query_id: str) -> Lead | None:
+        for lead in self._leads:
+            if lead.client_slug == client_slug and lead.tg_query_id == tg_query_id:
+                return lead
+        return None
 
     async def attach_phone(
         self, client_slug: str, tg_user_id: int, phone: str, since: datetime
@@ -206,8 +223,9 @@ class MemoryUpdateLog:
 
 _LEAD_COLUMNS = (
     "id, created_at, client_slug, tg_user_id, tg_username, tg_name, service, service_label,"
-    " slot_date, to_char(slot_time, 'HH24:MI') as slot_time, phone, status"
+    " slot_date, to_char(slot_time, 'HH24:MI') as slot_time, phone, status, tg_query_id"
 )
+_BY_QUERY = f"select {_LEAD_COLUMNS} from leads where client_slug = %s and tg_query_id = %s"
 
 
 def _lead(row: dict) -> Lead:
@@ -241,6 +259,13 @@ class PostgresLeadStore:
                 "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
                 (f"kit:leads:{lead.client_slug}",),
             )
+            if lead.tg_query_id is not None:
+                # Under the lock as well: an attempt that outlived its claim and
+                # the one that took it over cannot both insert.
+                cur = conn.cursor(row_factory=dict_row)
+                await cur.execute(_BY_QUERY, (lead.client_slug, lead.tg_query_id))
+                if row := await cur.fetchone():
+                    return _lead(row)
             cur = await conn.execute(
                 "select"
                 " count(*) filter (where tg_user_id = %s and slot_date >= %s),"
@@ -256,8 +281,8 @@ class PostgresLeadStore:
             cur = conn.cursor(row_factory=dict_row)
             await cur.execute(
                 "insert into leads (created_at, client_slug, tg_user_id, tg_username, tg_name,"
-                " service, service_label, slot_date, slot_time)"
-                " values (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " service, service_label, slot_date, slot_time, tg_query_id)"
+                " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 f" returning {_LEAD_COLUMNS}",
                 (
                     lead.created_at,
@@ -269,9 +294,17 @@ class PostgresLeadStore:
                     lead.service_label,
                     lead.slot_date,
                     time.fromisoformat(lead.slot_time),
+                    lead.tg_query_id,
                 ),
             )
             return _lead(await cur.fetchone())
+
+    async def lead_by_query(self, client_slug: str, tg_query_id: str) -> Lead | None:
+        async with self._pool.connection() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            await cur.execute(_BY_QUERY, (client_slug, tg_query_id))
+            row = await cur.fetchone()
+            return _lead(row) if row else None
 
     async def attach_phone(
         self, client_slug: str, tg_user_id: int, phone: str, since: datetime

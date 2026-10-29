@@ -1,6 +1,6 @@
 # 4. An idempotent webhook
 
-Status: accepted; revised with migration 003, when the log became claims
+Status: accepted; revised with migration 003, when the log became claims, and 004, when a lead learned the tap that created it
 
 ## Context
 
@@ -22,7 +22,7 @@ Two deliveries at once are settled by the database: the second upsert waits for 
 ## Consequences
 
 - At least once instead of at most once: a crash no longer loses the update, provided Telegram still retries after the window. Telegram promises retries for any answer other than 2xx but documents no schedule.
-- A replay runs the handler from the start, so whatever the dead attempt already did happens again. A booking saved just before the crash is saved a second time: with one place per slot the client is told the slot is taken (by their own first lead, which the owner never heard about), with several places a second lead appears. Keying a lead by the update that created it would fix both; that is left for later.
+- A replay runs the handler from the start, so whatever the dead attempt already did happens again unless the handler can tell. The booking handler can: a lead keeps the `callback_query.id` of the confirm tap that created it (migration 004, unique per business), and a re-delivery carries the same id. A replayed confirmation finds its lead before the free-slot check, which would count the lead against itself, and finishes what the dead attempt started: the owner's note and the client's "booked" screen, counted as `kit_bookings_total{result="replayed"}`. The note arrives twice if the dead attempt had sent it already. Telegram refuses to answer a tap that old; the booking handler logs that and carries on, the other buttons still fail on it with an ERROR line, which costs the client one navigation step.
 - The window has to outlast any handler run; a run that takes longer gets a second attempt next to it. The longest run today is an answer from Gemini after retries across three models. Each call is cut off after 20 s (`CALL_TIMEOUT_SECONDS` in `kit/llm.py`), so that run takes at most 3 models x 2 attempts x 20 s plus 13.5 s of backoff, 133.5 s, under half the window; a test keeps it there.
 - A slow answer shows up in `getWebhookInfo` as a 503 in `last_error_message`, and in `kit_updates_total{result="in_progress"}`.
 - Not chosen: a lock or transaction held for the whole run, which would notice a dead process at once. It keeps a pool connection busy per running update while the handlers need connections of their own, so a burst of updates would exhaust the pool.

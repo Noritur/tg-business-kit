@@ -12,11 +12,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from kit import callbacks, metrics
-from kit.handlers.common import button, client_label, deps, edit, notify_owner
+from kit.handlers.common import answer, button, client_label, deps, edit, notify_owner
 from kit.handlers.menu import back_to_menu_row
 from kit.profile import Profile, Service
 from kit.slots import is_bookable, local_today, template_times, upcoming_days
-from kit.storage import NewLead, SlotTaken, TooManyBookings
+from kit.storage import Lead, NewLead, SlotTaken, TooManyBookings
 
 log = logging.getLogger(__name__)
 
@@ -63,9 +63,31 @@ async def _show_days(query, context, service: Service, notice: str | None = None
     await edit(query, f"{notice}\n\n{text}" if notice else text, InlineKeyboardMarkup(rows))
 
 
+async def _booked(query, context, lead: Lead) -> None:
+    """Tells the owner, then shows the client their booking."""
+    profile = deps(context).profile
+    t = profile.t
+    day_label = t.day(lead.slot_date, with_year=True)
+    await notify_owner(
+        context,
+        t(
+            "owner_new_lead",
+            service=lead.service_label,
+            day=day_label,
+            time=lead.slot_time,
+            client=client_label(query.from_user),
+        ),
+    )
+    await edit(
+        query,
+        t("booked", service=lead.service_label, day=day_label, time=lead.slot_time),
+        InlineKeyboardMarkup([back_to_menu_row(profile)]),
+    )
+
+
 async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    await answer(query)
     d = deps(context)
     profile, t = d.profile, d.profile.t
 
@@ -94,6 +116,15 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await edit(query, t("choose_time", day=t.day(step.day)), InlineKeyboardMarkup(rows))
         return
 
+    # The same tap delivered again after the attempt handling it died: the lead
+    # may be saved already, and then the checks below would count it against
+    # itself. Finish what the dead attempt started instead.
+    if step.step == "c" and (saved := await d.store.lead_by_query(profile.slug, query.id)):
+        metrics.BOOKINGS.labels(result="replayed").inc()
+        log.warning("lead replayed: id=%s", saved.id)
+        await _booked(query, context, saved)
+        return
+
     if not is_bookable(profile, step.day, step.time, now) or step.time not in await _free_times(
         context, step.day
     ):
@@ -103,9 +134,8 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _show_days(query, context, service, notice=t("slot_unavailable"))
         return
 
-    day_label = t.day(step.day, with_year=True)
-
     if step.step == "t":
+        day_label = t.day(step.day, with_year=True)
         confirm = callbacks.booking("c", service.code, step.day, step.time)
         rows = [
             [InlineKeyboardButton(t("btn_confirm"), callback_data=confirm)],
@@ -131,6 +161,7 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         slot_date=step.day,
         slot_time=step.time,
         created_at=now,
+        tg_query_id=query.id,
     )
     try:
         saved = await d.store.save_lead(
@@ -156,18 +187,4 @@ async def router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     metrics.BOOKINGS.labels(result="created").inc()
     log.info("lead saved: id=%s service=%s %s %s", saved.id, service.code, step.day, step.time)
-    await notify_owner(
-        context,
-        t(
-            "owner_new_lead",
-            service=service.label,
-            day=day_label,
-            time=step.time,
-            client=client_label(user),
-        ),
-    )
-    await edit(
-        query,
-        t("booked", service=service.label, day=day_label, time=step.time),
-        InlineKeyboardMarkup([back_to_menu_row(profile)]),
-    )
+    await _booked(query, context, saved)

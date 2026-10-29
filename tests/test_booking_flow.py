@@ -2,11 +2,15 @@ import asyncio
 import logging
 from datetime import date
 
+import pytest
+
 from kit import callbacks
 from kit.storage import MemoryLeadStore
 from tests.conftest import ADMIN_ID, CLIENT_ID, metric, new_lead, put
 
 TUESDAY = date(2026, 10, 20)
+# What answerCallbackQuery says to a tap delivered again minutes later.
+TOO_OLD = "Bad Request: query is too old and response timeout expired or query id is invalid"
 
 
 async def _walk_to_confirm(bot, service="chk", time="09:00"):
@@ -64,6 +68,52 @@ async def test_double_tap_on_confirm_books_once(bot, store, dental):
     await bot.send(bot.click(confirm))
     assert len(await store.recent_leads(dental.slug)) == 1
     assert len(bot.texts_to(ADMIN_ID)) == 1
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+async def test_a_confirmation_replayed_after_a_crash_finishes_the_booking(
+    make_bot, store, dental, capacity
+):
+    # One place: the replay must not see its own lead as the slot taken.
+    # Two places: it must not save a second lead.
+    booking = dental.booking.model_copy(update={"slot_capacity": capacity})
+    profile = dental.model_copy(update={"booking": booking})
+    bot = await make_bot(profile)
+    tap = bot.click(await _walk_to_confirm(bot))
+    save_lead = store.save_lead
+
+    async def save_then_die(*args, **kwargs):
+        await save_lead(*args, **kwargs)
+        raise asyncio.CancelledError  # killed before the owner or the client heard of it
+
+    store.save_lead = save_then_die
+    with pytest.raises(asyncio.CancelledError):
+        await bot.send(tap)
+    assert bot.texts_to(ADMIN_ID) == []
+
+    # Past the claim's window Telegram delivers the same update again.
+    del store.save_lead
+    bot.request.errors["answerCallbackQuery"] = TOO_OLD
+    replayed = metric("kit_bookings_total", result="replayed")
+    await bot.send(tap)
+
+    assert metric("kit_bookings_total", result="replayed") == replayed + 1
+    assert len(await store.recent_leads(profile.slug)) == 1
+    assert len(bot.texts_to(ADMIN_ID)) == 1
+    text, _ = bot.last_screen()
+    assert text.startswith("Done, you're booked")
+
+
+async def test_a_tap_too_old_to_answer_still_books(bot, store, dental):
+    # The attempt that died had saved nothing: the re-delivery books from scratch.
+    confirm = await _walk_to_confirm(bot)
+    bot.request.errors["answerCallbackQuery"] = TOO_OLD
+    await bot.send(bot.click(confirm))
+
+    assert len(await store.recent_leads(dental.slug)) == 1
+    assert len(bot.texts_to(ADMIN_ID)) == 1
+    text, _ = bot.last_screen()
+    assert text.startswith("Done, you're booked")
 
 
 class SlowStore(MemoryLeadStore):
